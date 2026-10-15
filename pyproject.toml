@@ -14,7 +14,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
-    "browser_cookie3>=1.4",  # scripts/export_yandex_cookies.py
+    "browser-cookie3>=0.16",  # scripts/export_yandex_cookies.py
 ]
 
 [tool.hatch.build.targets.wheel]
