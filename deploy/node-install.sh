@@ -7,7 +7,7 @@
 # upstream; the updater runs this fork via install_self.
 #
 # Installs one OpenFlux exit channel on a Linux VDS. The "Своя нода" wizard
-# of the OpenFlux apps downloads this fclaudeile by a pinned commit, checks
+# of the OpenFlux apps downloads this file by a pinned commit, checks
 # its SHA-256 and runs it over SSH. Every channel is independent: its own
 # transports (a Yandex document, a Mail.ru document, cups.online rooms, and
 # always direct as the backup), key, port and systemd instance
