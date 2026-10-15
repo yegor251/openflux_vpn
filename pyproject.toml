@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "docprovider"
+version = "0.1.0"
+description = "Provision carrier documents (Yandex Docs, Mail.ru public links) for OpenFlux VPN channels"
+requires-python = ">=3.13"
+dependencies = [
+    "requests>=2.32",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "browser_cookie3>=1.4",  # scripts/export_yandex_cookies.py
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/docprovider"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# live-тесты ходят в реальные сервисы и требуют секреты из окружения:
+# запускаются явно через `pytest -m live`, юнит-тесты их никогда не трогают.
+addopts = "-m 'not live'"
+markers = [
+    "live: tests against real Yandex/Mail.ru accounts (deselect with '-m \"not live\"')",
+]

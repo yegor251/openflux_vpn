@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+dist/
+.pytest_cache/
+
+# IDE
+.idea/
+
+# OpenFlux library clone (reference only, upstream repo)
+/OpenFlux/
+
+# Secrets: accounts, cookies, admin state
+accounts*.json
+*cookies*.txt
+cookies*.json
+admin-state*.json
+out/
+
+# Built openflux binaries
+/bin/
