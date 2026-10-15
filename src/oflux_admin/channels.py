@@ -107,6 +107,7 @@ def add_user(
 
     return registry.add(
         channel,
+        channel=channel,
         key=key,
         port=int(result.get("port", port)),
         vds=server.name,
