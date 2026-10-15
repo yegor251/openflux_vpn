@@ -3,12 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "docprovider"
-version = "0.1.0"
-description = "Provision carrier documents (Yandex Docs, Mail.ru public links) for OpenFlux VPN channels"
+name = "openflux-vpn"
+version = "0.2.0"
+description = "Per-user OpenFlux VPN channels: docprovider (carrier docs) + oflux-admin (control plane)"
 requires-python = ">=3.13"
 dependencies = [
     "requests>=2.32",
+    "paramiko>=3.4",
+    "qrcode>=7.4",
+    "pillow>=10.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -17,8 +21,11 @@ dev = [
     "browser-cookie3>=0.16",  # scripts/export_yandex_cookies.py
 ]
 
+[project.scripts]
+oflux-admin = "oflux_admin.cli:main"
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/docprovider"]
+packages = ["src/docprovider", "src/oflux_admin"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
