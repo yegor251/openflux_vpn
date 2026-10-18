@@ -1,0 +1,16 @@
+# Managed by openflux_vpn deploy. Installed to /etc/systemd/system/.
+# Runs the self-service telegram bot from the repo checkout on this VPS.
+[Unit]
+Description=openflux telegram bot (self-service VPN channels)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/openflux_vpn
+ExecStart=/root/openflux_vpn/.venv/bin/python -m oflux_bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -134,9 +134,35 @@ def cmd_install(new_file: Path) -> int:
     CLIENT_STORE.chmod(0o600)
     print(f"пересобран клиентский стор: {CLIENT_STORE} ({len(jar)} док(ов))")
 
+    _push_to_bot_host()
     _seed_nodes(jar)
     print("готово. напоминание: значения кук нигде не печатаем, файлы 0600")
     return 0
+
+
+BOT_HOST = "root@159.194.227.248"
+BOT_COOKIES_REMOTE = "/root/.config/oflux-bot/ya-cookies.txt"
+
+
+def _push_to_bot_host() -> None:
+    """The telegram bot issues channels from the VPS: it needs the cookies."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", BOT_HOST,
+             f"mkdir -p /root/.config/oflux-bot && cat > {BOT_COOKIES_REMOTE} && chmod 600 {BOT_COOKIES_REMOTE}"],
+            stdin=open(COOKIES_PATH, "rb"),
+            capture_output=True,
+            timeout=60,
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort sync
+        print(f"  пуш кук на {BOT_HOST}: FAIL ({exc}) — бот обновит при следующем install")
+        return
+    if proc.returncode == 0:
+        print(f"  скопированы боту: {BOT_HOST}:{BOT_COOKIES_REMOTE}")
+    else:
+        print(f"  пуш кук на {BOT_HOST}: FAIL (rc={proc.returncode})")
 
 
 def _seed_nodes(jar: dict) -> None:

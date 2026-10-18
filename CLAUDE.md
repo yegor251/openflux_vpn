@@ -112,6 +112,19 @@ l3 (UDP NAT) этот стенд НЕ проверяет — только жив
   «Мониторинг апстрима». Не заводить эти транспорты в каналы, пока там
   не сказано обратное.
 
+## Telegram-бот (oflux_bot)
+
+- Код: `src/oflux_bot/`, живёт на VPS (`systemctl status oflux-bot`),
+  деплой — `scripts/deploy_bot.sh` (idempotent после каждого push).
+- Секреты на VPS: `/root/.config/oflux-bot/` — `bot.yaml` (токен +
+  alert_tg_id), `users.json` (реестр — рабочая копия/мастер каналов,
+  выпущенных ботом!), `ya-cookies.txt`. Всё 0600, вне git.
+- Приглашения: на VPS `.venv/bin/python -m oflux_bot.invite` →
+  deep-link `t.me/<bot>?start=<token>`.
+- Команды бота — только обёртки над oflux-admin (LocalOps вместо SSH:
+  `src/oflux_admin/localops.py`). Ссылки в логах — маскированные
+  (`mask_link`), aiogram logger прижат к WARNING.
+
 ## Куда смотреть сначала
 
 `docs/PLAN.md` (состояние/план/гонки) → `src/docprovider/README.md`
