@@ -16,7 +16,18 @@ bot_token: "FILL_ME_FROM_BOTFATHER"
 alert_tg_id: 0
 max_channels_per_user: 1
 EOF
-    chmod 600 /root/.config/oflux-bot/bot.yaml"
+    chmod 600 /root/.config/oflux-bot/bot.yaml
+    [ -f /root/.config/oflux-bot/servers.yaml ] || cat > /root/.config/oflux-bot/servers.yaml <<'EOF'
+settings:
+  installer: deploy/node-install.sh
+  openflux_bin: /opt/openflux-node/bin/openflux
+servers:
+  - name: test1
+    host: 159.194.227.248
+    port_range: [20000, 20099]
+    max_channels: 20
+EOF
+    chmod 600 /root/.config/oflux-bot/servers.yaml"
 ssh -o BatchMode=yes "$HOST" "cp $REPO/deploy/oflux-bot.service /etc/systemd/system/ &&
     systemctl daemon-reload && systemctl enable oflux-bot >/dev/null 2>&1"
 echo "deployed. if bot.yaml is still FILL_ME, fill it on the VPS, then:"
