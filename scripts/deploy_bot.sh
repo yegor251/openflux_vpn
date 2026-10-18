@@ -12,7 +12,7 @@ ssh -o BatchMode=yes "$HOST" "cd $REPO &&
     .venv/bin/pip install -q -e . &&
     mkdir -p /root/.config/oflux-bot &&
     [ -f /root/.config/oflux-bot/bot.yaml ] || cat > /root/.config/oflux-bot/bot.yaml <<'EOF'
-bot_token: \"FILL_ME_FROM_BOTFATHER\"
+bot_token: "FILL_ME_FROM_BOTFATHER"
 alert_tg_id: 0
 max_channels_per_user: 1
 EOF
