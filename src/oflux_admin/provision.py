@@ -7,6 +7,8 @@ from pathlib import Path
 
 from .sshops import SSHOps
 
+CONF_ROOT = "/etc/openflux-node"
+
 
 def build_channel_config(
     *,
@@ -135,3 +137,11 @@ class Provisioner:
 
     def list(self) -> dict:
         return self._run_script("list")
+
+    def channel_mode(self, channel: str) -> str:
+        """The channel's exit mode from its node.conf ('' if unknown)."""
+        rc, out, _ = self.ops.run(
+            f"grep -h '^Mode' {CONF_ROOT}/{self.ops.quote(channel)}/node.conf 2>/dev/null || true"
+        )
+        line = out.strip()
+        return line.split("=", 1)[1].strip() if "=" in line else ""

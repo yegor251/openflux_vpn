@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .channels import add_user, channel_for, link_user, revoke_user
+from .channels import add_user, channel_for, doctor_user, link_user, revoke_user, rotate_user
 from .config import AdminConfig, UserRegistry, load_config
 
 DEFAULT_CONFIG_DIR = Path("~/.config/oflux-admin").expanduser()
@@ -24,17 +24,16 @@ def _open(config_path: str) -> tuple[AdminConfig, UserRegistry]:
 
 
 def cmd_add_user(args, cfg: AdminConfig, registry: UserRegistry) -> int:
-    server = cfg.server(args.server)
     user = add_user(
         name=args.name,
         config=cfg,
         registry=registry,
-        server=server,
+        server=cfg.server(args.server) if args.server else None,
         yandex_cookies=args.yandex_cookies,
         out_dir=Path(cfg.settings.out_dir),
         mode=args.mode,
     )
-    print(f"user {args.name} -> channel {user['channel']} on {server.name} ({server.host}:{user['port']})")
+    print(f"user {args.name} -> channel {user['channel']} on {user['vds']} ({user['host']}:{user['port']})")
     print(f"link: {user['link']}")
     print(f"qr:   {user['qr']}")
     print("hand the link (or scan the QR) to the user over a secure channel")
@@ -61,6 +60,31 @@ def cmd_link(args, cfg: AdminConfig, registry: UserRegistry) -> int:
     )
     print(link)
     return 0
+
+
+def cmd_rotate(args, cfg: AdminConfig, registry: UserRegistry) -> int:
+    result = rotate_user(
+        name=args.name,
+        config=cfg,
+        registry=registry,
+        out_dir=Path(cfg.settings.out_dir),
+    )
+    print(f"rotated {result['channel']} (new key applied, port {result['port']})")
+    print(f"link: {result['link']}")
+    print(f"qr:   {result['qr']}")
+    print("the OLD link is dead: the user must import the new link/QR")
+    return 0
+
+
+def cmd_doctor(args, cfg: AdminConfig, registry: UserRegistry) -> int:
+    report = doctor_user(name=args.name, config=cfg, registry=registry)
+    print(f"channel {report['channel']}" + (" (REVOKED)" if report["revoked"] else ""))
+    ok = True
+    for name, check in report["checks"].items():
+        mark = "ok  " if check["ok"] else "FAIL"
+        ok = ok and check["ok"]
+        print(f"  [{mark}] {name}: {check['detail']}")
+    return 0 if ok else 1
 
 
 def cmd_revoke(args, cfg: AdminConfig, registry: UserRegistry) -> int:
@@ -98,7 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_add = sub.add_parser("add-user", help="create a new user's VPN channel")
     p_add.add_argument("name", help="user name (a-z, 0-9, dash)")
-    p_add.add_argument("--server", default=None, help="server name from servers.yaml")
+    p_add.add_argument(
+        "--server",
+        default=None,
+        help="server name from servers.yaml (default: auto-pick the emptiest)",
+    )
     p_add.add_argument(
         "--mode",
         choices=("l3", "l4"),
@@ -110,6 +138,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_link = sub.add_parser("link", help="re-print the openflux:// link and QR")
     p_link.add_argument("name")
+
+    p_rotate = sub.add_parser("rotate", help="new channel key + new link (documents untouched)")
+    p_rotate.add_argument("name")
+
+    p_doctor = sub.add_parser("doctor", help="health checks: unit, port, documents")
+    p_doctor.add_argument("name")
 
     p_revoke = sub.add_parser("revoke", help="kill a user's channel and revoke documents")
     p_revoke.add_argument("name")
@@ -124,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
         "add-user": cmd_add_user,
         "list": cmd_list,
         "link": cmd_link,
+        "rotate": cmd_rotate,
+        "doctor": cmd_doctor,
         "revoke": cmd_revoke,
     }
     return handlers[args.cmd](args, cfg, registry)

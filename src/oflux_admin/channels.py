@@ -1,4 +1,4 @@
-"""High-level channel operations: add-user, revoke, link.
+"""High-level channel operations: add-user, rotate, doctor, revoke, link.
 
 One call = one person's VPN channel: carrier documents (docprovider),
 a channel on the VDS (node-install.sh fork over SSH), and an
@@ -8,6 +8,7 @@ openflux:// link with QR for the user's app.
 from __future__ import annotations
 
 import secrets
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from docprovider import (
     MailruClient,
     YandexAccount,
     YandexDocCreator,
+    check_yandex_doc,
     make_link,
     parse_link,
 )
@@ -44,16 +46,39 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def pick_server(config: AdminConfig, registry: UserRegistry) -> Server:
+    """The server with the most free channel slots; raises if all full."""
+    candidates = [
+        s for s in config.servers if registry.active_count(s.name) < s.max_channels
+    ]
+    if not candidates:
+        raise ValueError(
+            "all servers are at max_channels: "
+            + ", ".join(f"{s.name} ({s.max_channels})" for s in config.servers)
+        )
+    return max(candidates, key=lambda s: s.max_channels - registry.active_count(s.name))
+
+
+def _docs_from_registry(user: dict) -> ChannelDocs:
+    mailru = type("D", (), {"url": user["mailru_url"]})() if user.get("mailru_url") else None
+    return ChannelDocs(
+        name=user["channel"],
+        yandex=type("D", (), {"url": user["yandex_url"]})(),
+        mailru=mailru,
+    )
+
+
 def add_user(
     *,
     name: str,
     config: AdminConfig,
     registry: UserRegistry,
-    server: Server,
+    server: Server | None,
     yandex_cookies: str,
     out_dir: Path,
     mode: str = "l3",
 ) -> dict:
+    server = server or pick_server(config, registry)
     channel = channel_for(name)
     if registry.get(channel):
         raise ValueError(f"user {name!r} already exists (channel {channel})")
@@ -124,16 +149,10 @@ def link_user(
     user = registry.get(channel)
     if not user or user.get("revoked"):
         raise ValueError(f"no active user {name!r}")
-    mailru = type("D", (), {"url": user["mailru_url"]})() if user.get("mailru_url") else None
-    docs = ChannelDocs(
-        name=channel,
-        yandex=type("D", (), {"url": user["yandex_url"]})(),
-        mailru=mailru,
-    )
     link = make_link(
         name=channel,
         secret=user["key"],
-        docs=docs,
+        docs=_docs_from_registry(user),
         direct_dial=f"{user['host']}:{user['port']}",
         binary=config.settings.openflux_bin,
     )
@@ -142,6 +161,107 @@ def link_user(
     qrcode.make(link).save(qr_path)
     registry.update(channel, link=link, qr=str(qr_path))
     return link
+
+
+def rotate_user(
+    *,
+    name: str,
+    config: AdminConfig,
+    registry: UserRegistry,
+    out_dir: Path,
+) -> dict:
+    """New channel key on the VDS + new user link. Documents untouched.
+
+    The old link stops working the moment the channel is re-applied; the
+    user must import the new one.
+    """
+    channel = channel_for(name)
+    user = registry.get(channel)
+    if not user or user.get("revoked"):
+        raise ValueError(f"no active user {name!r}")
+    server = config.server(user["vds"])
+    new_key = secrets.token_hex(32)
+
+    with SSHOps(server.host, server.user, server.key_path) as ops:
+        prov = Provisioner(ops, config.settings.installer)
+        prov.sync_installer()
+        mode = prov.channel_mode(channel)
+        prov.remove(channel)
+        conf = build_channel_config(
+            channel=channel,
+            key=new_key,
+            port=user["port"],
+            yandex_url=user["yandex_url"],
+            mailru_url=user.get("mailru_url", ""),
+            mode=mode,
+        )
+        result = prov.apply(channel, conf)
+
+    link = make_link(
+        name=channel,
+        secret=new_key,
+        docs=_docs_from_registry(user),
+        direct_dial=f"{user['host']}:{result.get('port', user['port'])}",
+        binary=config.settings.openflux_bin,
+    )
+    parse_link(link, binary=config.settings.openflux_bin)  # self-check
+    qr_path = out_dir / f"{channel}.png"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    qrcode.make(link).save(qr_path)
+    registry.update(
+        channel,
+        key=new_key,
+        link=link,
+        qr=str(qr_path),
+        rotated=_now(),
+    )
+    return {"channel": channel, "port": int(result.get("port", user["port"])), "link": link, "qr": str(qr_path)}
+
+
+def doctor_user(*, name: str, config: AdminConfig, registry: UserRegistry) -> dict:
+    """Health checks for one channel: unit, port, documents."""
+    channel = channel_for(name)
+    user = registry.get(channel)
+    if not user:
+        raise ValueError(f"no user {name!r}")
+    checks: dict[str, dict] = {}
+    report = {"channel": channel, "revoked": bool(user.get("revoked")), "checks": checks}
+    if user.get("revoked"):
+        checks["registry"] = {"ok": False, "detail": "channel is revoked"}
+        return report
+
+    server = config.server(user["vds"])
+    with SSHOps(server.host, server.user, server.key_path) as ops:
+        prov = Provisioner(ops, config.settings.installer)
+        _, out, _ = ops.run(f"systemctl is-active openflux-node@{channel}")
+        state = out.strip() or "unknown"
+        checks["unit"] = {"ok": state == "active", "detail": state}
+        _, out, _ = ops.run(
+            f"systemctl show openflux-node@{channel} -p NRestarts --value"
+        )
+        restarts = out.strip() or "0"
+        checks["restarts"] = {"ok": restarts == "0", "detail": restarts}
+        mode = prov.channel_mode(channel)
+        checks["mode"] = {"ok": True, "detail": mode or "unknown"}
+
+    try:
+        with socket.create_connection((user["host"], int(user["port"])), timeout=4):
+            checks["port"] = {"ok": True, "detail": f"{user['host']}:{user['port']} reachable"}
+    except OSError as exc:
+        checks["port"] = {"ok": False, "detail": str(exc)}
+
+    try:
+        check_yandex_doc(user["yandex_url"])
+        checks["yandex_doc"] = {"ok": True, "detail": "reachable (PoW wall = normal)"}
+    except Exception as exc:  # noqa: BLE001 - report, don't crash doctor
+        checks["yandex_doc"] = {"ok": False, "detail": str(exc)[:120]}
+
+    if user.get("mailru_url"):
+        checks["mailru_doc"] = {
+            "ok": False,
+            "detail": "legacy channel: mailru anon access closed (upstream #193)",
+        }
+    return report
 
 
 def revoke_user(

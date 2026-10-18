@@ -45,7 +45,18 @@ check_mailru_public(mr.url)               # анонимный запрос, к�
 | Вызов | Результат |
 |---|---|
 | `create(name)` → `YandexDoc` | создаёт `/disk/openflux/<name>.docx`, публикует с правом редактирования по ссылке, возвращает `office_online_sharing_url` |
-| `unpublish(path)` | best-effort закрытие публичного доступа (`mpfs/unpublish-all`) |
+| `unpublish(path)` | best-effort закрытие публичного доступа (**сейчас НЕ работает** — см. ниже) |
+
+> **Ограничение (найдено 2026-10-18, M3-приёмка):** метода отзыва публикации
+> в `models-v2`-протоколе не существует/не разрешён — `mpfs/unpublish`,
+> `mpfs/unpublish-all`, `mpfs/remove-resource`, `mpfs/delete`,
+> `mpfs/unset-public`… все отвечают **405** (как и заведомо неизвестные
+> имена); `office-set-access-state` принимает только `accessState: "all"`,
+> прочие значения дают **500**. REST-отзыв (`cloud-api.yandex.net`) требует
+> OAuth, которого у cookie-сессии нет. Следствие: после `revoke` яндекс-док
+> **остаётся опубликованным** (пустой .docx, канал при этом мёртв — ключ
+> в реестре, нода снята). `oflux-admin revoke` печатает warning — это
+> ожидаемо. Удалить доки вручную можно в веб-интерфейсе Диска.
 
 Внутренний флоу (порт `OpenFluxClientShared/model/YandexDisk.kt`):
 cookies → GET `disk.yandex.ru/client/disk` → CSRF `sk`/`skExternal` из
