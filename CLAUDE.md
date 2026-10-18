@@ -116,3 +116,7 @@ l3 (UDP NAT) этот стенд НЕ проверяет — только жив
 
 `docs/PLAN.md` (состояние/план/гонки) → `src/docprovider/README.md`
 (live-контракты API Яндекса/Mail.ru и грабли) → этот файл.
+
+Скилл `.claude/skills/refresh-cookies/SKILL.md` — процедура обновления
+куки Яндекса (запускать при плановой проверке раз в 1–2 недели или при
+`CookiesExpiredError`/passport-ошибках в add-user/rotate/check).
