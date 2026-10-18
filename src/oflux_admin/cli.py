@@ -32,6 +32,7 @@ def cmd_add_user(args, cfg: AdminConfig, registry: UserRegistry) -> int:
         server=server,
         yandex_cookies=args.yandex_cookies,
         out_dir=Path(cfg.settings.out_dir),
+        mode=args.mode,
     )
     print(f"user {args.name} -> channel {user['channel']} on {server.name} ({server.host}:{user['port']})")
     print(f"link: {user['link']}")
@@ -98,6 +99,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_add = sub.add_parser("add-user", help="create a new user's VPN channel")
     p_add.add_argument("name", help="user name (a-z, 0-9, dash)")
     p_add.add_argument("--server", default=None, help="server name from servers.yaml")
+    p_add.add_argument(
+        "--mode",
+        choices=("l3", "l4"),
+        default="l3",
+        help="exit forwarding mode (l3 = raw SNAT, needs root + iptables; l4 = stream proxy)",
+    )
 
     sub.add_parser("list", help="list active users")
 

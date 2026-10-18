@@ -29,8 +29,8 @@ packages = ["src/docprovider", "src/oflux_admin"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# live-тесты ходят в реальные сервисы и требуют секреты из окружения:
-# запускаются явно через `pytest -m live`, юнит-тесты их никогда не трогают.
+# Live-тесты (реальные сервисы, секреты) жили в tests/live и были удалены
+# после приёмки 2026-10-18; восстанавливаются из git-истории при нужде.
 addopts = "-m 'not live'"
 markers = [
     "live: tests against real Yandex/Mail.ru accounts (deselect with '-m \"not live\"')",

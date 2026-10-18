@@ -40,6 +40,14 @@ def test_build_channel_config_without_mailru():
     assert known == {"channel", "yandex", "key", "port", "autoupdate"}
 
 
+def test_build_channel_config_mode():
+    cfg = build_channel_config(channel="of-x", key="a" * 64, port=1, mode="l3")
+    assert "mode=l3" in cfg.strip().splitlines()
+    # default: no mode line, installer falls back to its own default (l4)
+    cfg = build_channel_config(channel="of-x", key="a" * 64, port=1)
+    assert "mode=" not in cfg
+
+
 def test_parse_json_line_skips_noise():
     out = 'warning: something\n{"ok":true,"port":20123}\n'
     assert parse_json_line(out) == {"ok": True, "port": 20123}

@@ -2,9 +2,10 @@
 # Managed by OpenFlux node-install.sh
 #
 # FORK (openflux_vpn): adds the `yandex=` carrier key (the plain
-# Yandex.Docs WebSocket transport, anonymous, PoW auto-solved) on top
-# of the stock vyandex=/mailru=/cupsonline=. Everything else is
-# upstream; the updater runs this fork via install_self.
+# Yandex.Docs WebSocket transport, anonymous, PoW auto-solved) and the
+# `mode=` key (l3 with kernel-RST suppression) on top of the stock
+# vyandex=/mailru=/cupsonline=. Everything else is upstream; the
+# updater runs this fork via install_self.
 #
 # Installs one OpenFlux exit channel on a Linux VDS. The "Своя нода" wizard
 # of the OpenFlux apps downloads this file by a pinned commit, checks
@@ -261,7 +262,7 @@ pick_port() {
 
 # ---- input ------------------------------------------------------------------
 
-CHANNEL=""; YANDEX=""; URL=""; MAILRU=""; CUPS=""; KEY=""; PORT=""; AUTOUPDATE=""
+CHANNEL=""; YANDEX=""; MODE=""; URL=""; MAILRU=""; CUPS=""; KEY=""; PORT=""; AUTOUPDATE=""
 
 # read_config [FILE]: reads stdin, or FILE and then deletes it.
 read_config() {
@@ -275,6 +276,7 @@ read_config() {
         case "$line" in
             channel=*) CHANNEL=${line#channel=} ;;
             yandex=*) YANDEX=${line#yandex=} ;;
+            mode=*) MODE=${line#mode=} ;;
             url=*) URL=${line#url=} ;;
             vyandex=*) URL=${line#vyandex=} ;;
             mailru=*) MAILRU=${line#mailru=} ;;
@@ -306,6 +308,7 @@ valid_port() {
 check_transports() {
     [ -z "$YANDEX" ] || valid_url "$YANDEX" || fail input "адрес документа должен быть вида https://docs.yandex.ru/edit/d/..."
     [ -z "$URL" ] || valid_url "$URL" || fail input "адрес документа должен быть вида https://docs.yandex.ru/edit/d/..."
+    case "$MODE" in ""|l3|l4) ;; *) fail input "mode: l3 или l4" ;; esac
     [ -z "$MAILRU" ] || valid_mailru "$MAILRU" || fail input "ссылка Mail.ru должна быть вида https://cloud.mail.ru/public/..."
     [ -z "$CUPS" ] || valid_rooms "$CUPS" || fail input "неверный список комнат cups.online"
     case "$AUTOUPDATE" in ""|yes|no) ;; *) fail input "autoupdate: yes или no" ;; esac
@@ -574,7 +577,7 @@ write_node_conf() {
     cat <<EOF
 # OpenFlux node channel $CHANNEL, written by node-install.sh
 Role = exit
-Mode = l4
+Mode = ${MODE:-l4}
 EncryptionKeyFile = $CONF_ROOT/$CHANNEL/encryption-key
 CookieStore = $STATE_ROOT/$CHANNEL/cookies.json
 EOF
@@ -650,6 +653,38 @@ cmd_apply() {
             CREATED_FW=firewalld ;;
     esac
     [ -n "$CREATED_FW" ] && printf '%s %s\n' "$CREATED_FW" "$PORT" > "$dir/firewall"
+
+    if [ "$MODE" = "l3" ]; then
+        mkdir -p "/etc/systemd/system/openflux-node@$CHANNEL.service.d"
+        cat > "/etc/systemd/system/openflux-node@$CHANNEL.service.d/l3.conf" <<EOF
+$MARKER
+# mode=l3: raw sockets need CAP_NET_RAW (works with NoNewPrivileges)
+[Service]
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+EOF
+        egress=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+        [ -n "$egress" ] || apply_fail firewall "mode=l3: не удалось определить egress IP"
+        # insert FIRST: ufw-track-output ACCEPTs ctstate NEW before any
+        # appended rule, so -A here would never see the RSTs
+        iptables -C OUTPUT -p tcp --tcp-flags RST RST -s "$egress" -j DROP 2>/dev/null \
+            || iptables -I OUTPUT 1 -p tcp --tcp-flags RST RST -s "$egress" -j DROP \
+            || apply_fail firewall "не удалось добавить iptables-правило против kernel-RST"
+        cat > /etc/systemd/system/openflux-rstdrop.service <<'EOF'
+[Unit]
+Description=openflux l3: suppress kernel RSTs that kill the tunnel
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'e=$(ip -4 route get 1.1.1.1 | sed -n "s/.* src \\([0-9.]*\\).*/\\1/p" | head -1); iptables -C OUTPUT -p tcp --tcp-flags RST RST -s "$e" -j DROP 2>/dev/null || iptables -I OUTPUT 1 -p tcp --tcp-flags RST RST -s "$e" -j DROP'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable openflux-rstdrop.service >/dev/null 2>&1 || true
+    fi
 
     unit_start "openflux-node@$CHANNEL" \
         || apply_fail start "не удалось запустить openflux-node@$CHANNEL"

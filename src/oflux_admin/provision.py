@@ -15,6 +15,7 @@ def build_channel_config(
     port: int,
     yandex_url: str = "",
     mailru_url: str = "",
+    mode: str = "",
     autoupdate: str = "yes",
 ) -> str:
     """The key=value config node-install.sh apply reads (stdin or file)."""
@@ -23,6 +24,8 @@ def build_channel_config(
         lines.append(f"yandex={yandex_url}")
     if mailru_url:
         lines.append(f"mailru={mailru_url}")
+    if mode:
+        lines.append(f"mode={mode}")
     lines.append(f"key={key}")
     lines.append(f"port={port}")
     lines.append(f"autoupdate={autoupdate}")

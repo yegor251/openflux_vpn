@@ -52,6 +52,7 @@ def add_user(
     server: Server,
     yandex_cookies: str,
     out_dir: Path,
+    mode: str = "l3",
 ) -> dict:
     channel = channel_for(name)
     if registry.get(channel):
@@ -77,6 +78,7 @@ def add_user(
             key=key,
             port=port,
             yandex_url=ya.url,
+            mode=mode,
         )
         result = prov.apply(channel, cfg)
 
