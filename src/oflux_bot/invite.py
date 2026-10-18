@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .config import BotConfig, BotUsers
+from .config import BotUsers, load_bot_config
 
 
 def main() -> int:
