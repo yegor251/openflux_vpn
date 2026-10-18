@@ -10,7 +10,14 @@ from docprovider.validate import check_mailru_public, validate_mailru_url
 
 from conftest import _mailru_creds
 
-pytestmark = pytest.mark.live
+pytestmark = [
+    pytest.mark.live,
+    # Mail.ru closed anonymous access to public links (upstream #193,
+    # 2026-10-15): check_mailru_public below can no longer pass. The doc
+    # lifecycle calls (create/publish/unpublish) still work. Drop the
+    # skip if Mail.ru reopens anonymous access.
+    pytest.mark.skip(reason="mailru transport dropped: anonymous access closed (upstream #193)"),
+]
 
 
 def test_create_publish_verify_unpublish():

@@ -31,7 +31,6 @@ def cmd_add_user(args, cfg: AdminConfig, registry: UserRegistry) -> int:
         registry=registry,
         server=server,
         yandex_cookies=args.yandex_cookies,
-        mailru_cookies=args.mailru_cookies,
         out_dir=Path(cfg.settings.out_dir),
     )
     print(f"user {args.name} -> channel {user['channel']} on {server.name} ({server.host}:{user['port']})")
@@ -92,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mailru-cookies",
         default=_default("mr-cookies.txt"),
-        help="Netscape cookies.txt of the admin's Mail.ru account",
+        help="Mail.ru cookies; only used by revoke for legacy channels with a mailru doc",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 

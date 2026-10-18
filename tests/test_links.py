@@ -80,6 +80,19 @@ def test_make_link_without_direct(binary):
     assert {t["type"] for t in config["transports"]} == {"yandex", "mailru"}
 
 
+def test_make_link_without_mailru(binary):
+    # the default since Mail.ru closed anonymous access (upstream #193)
+    docs = ChannelDocs(name="of-test", yandex=DOCS.yandex)
+    link = make_link(
+        name="of-test",
+        secret="unit-test-secret-0123456789abcdef",
+        docs=docs,
+        binary=binary,
+    )
+    config = parse_link(link, binary=binary)
+    assert {t["type"] for t in config["transports"]} == {"yandex"}
+
+
 def test_secret_too_short_rejected(binary):
     from docprovider.errors import OpenFluxBinaryError
 

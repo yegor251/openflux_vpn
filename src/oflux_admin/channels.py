@@ -51,7 +51,6 @@ def add_user(
     registry: UserRegistry,
     server: Server,
     yandex_cookies: str,
-    mailru_cookies: str,
     out_dir: Path,
 ) -> dict:
     channel = channel_for(name)
@@ -63,14 +62,6 @@ def add_user(
     # 1. carrier documents (admin machine; needs live cookies)
     yandex = YandexDocCreator(YandexAccount(id="admin", cookies_path=yandex_cookies))
     ya = yandex.create(channel)
-    mailru = MailruClient(
-        MailruAccount(
-            id="admin",
-            login=config.settings.mailru_login,
-            cookies_path=mailru_cookies,
-        )
-    )
-    mr = mailru.create_doc(channel)
 
     # 2. credentials and port
     key = secrets.token_hex(32)
@@ -86,12 +77,11 @@ def add_user(
             key=key,
             port=port,
             yandex_url=ya.url,
-            mailru_url=mr.url,
         )
         result = prov.apply(channel, cfg)
 
     # 4. user-facing link + QR
-    docs = ChannelDocs(name=channel, yandex=ya, mailru=mr)
+    docs = ChannelDocs(name=channel, yandex=ya)
     link = make_link(
         name=channel,
         secret=key,
@@ -114,8 +104,6 @@ def add_user(
         host=server.host,
         yandex_url=ya.url,
         yandex_path=ya.path,
-        mailru_url=mr.url,
-        mailru_home=mr.home,
         link=link,
         qr=str(qr_path),
         created=_now(),
@@ -134,10 +122,11 @@ def link_user(
     user = registry.get(channel)
     if not user or user.get("revoked"):
         raise ValueError(f"no active user {name!r}")
+    mailru = type("D", (), {"url": user["mailru_url"]})() if user.get("mailru_url") else None
     docs = ChannelDocs(
         name=channel,
         yandex=type("D", (), {"url": user["yandex_url"]})(),
-        mailru=type("D", (), {"url": user["mailru_url"]})(),
+        mailru=mailru,
     )
     link = make_link(
         name=channel,
@@ -182,14 +171,15 @@ def revoke_user(
             errors.append(f"vds: {exc}")
 
     try:
-        mailru = MailruClient(
-            MailruAccount(
-                id="admin",
-                login=config.settings.mailru_login,
-                cookies_path=mailru_cookies,
+        if user.get("mailru_url"):  # legacy channels provisioned before 2026-10-18
+            mailru = MailruClient(
+                MailruAccount(
+                    id="admin",
+                    login=config.settings.mailru_login,
+                    cookies_path=mailru_cookies,
+                )
             )
-        )
-        mailru.unpublish(user["mailru_url"])
+            mailru.unpublish(user["mailru_url"])
     except Exception as exc:  # noqa: BLE001 - best-effort cleanup
         errors.append(f"mailru unpublish: {exc}")
 

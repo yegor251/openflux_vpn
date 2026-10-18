@@ -26,6 +26,20 @@ def test_build_channel_config_shape():
     assert known == {"channel", "yandex", "mailru", "key", "port", "autoupdate"}
 
 
+def test_build_channel_config_without_mailru():
+    # the default since the mailru transport was dropped
+    cfg = build_channel_config(
+        channel="of-x",
+        key="a" * 64,
+        port=20123,
+        yandex_url="https://docs.yandex.ru/edit/d/0123456789abcdef",
+    )
+    lines = cfg.strip().splitlines()
+    assert "mailru=" not in cfg
+    known = {l.split("=")[0] for l in lines}
+    assert known == {"channel", "yandex", "key", "port", "autoupdate"}
+
+
 def test_parse_json_line_skips_noise():
     out = 'warning: something\n{"ok":true,"port":20123}\n'
     assert parse_json_line(out) == {"ok": True, "port": 20123}

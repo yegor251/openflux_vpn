@@ -61,11 +61,16 @@ class YandexDoc:
 
 @dataclass(frozen=True)
 class ChannelDocs:
-    """Carrier documents for one VPN channel (one per user)."""
+    """Carrier documents for one VPN channel (one per user).
+
+    mailru is optional since 2026-10-18: Mail.ru closed anonymous
+    access to public links (upstream issue #193), so the transport is
+    unwired until that reverses.
+    """
 
     name: str
     yandex: YandexDoc
-    mailru: MailruDoc
+    mailru: MailruDoc | None = None
 
 
 @dataclass

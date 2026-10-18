@@ -59,6 +59,11 @@ cookies → GET `disk.yandex.ru/client/disk` → CSRF `sk`/`skExternal` из
 
 ### `mailru.MailruClient(account, session=None)`
 
+> **Транспорт mailru отключён (2026-10-18).** Mail.ru закрыл анонимный
+> доступ к публичным ссылкам — апстрим issue #193, см. `docs/OPEN_TAILS.md`.
+> Модуль и его live-контракты ниже оставлены рабочими (жизненный цикл
+> документов); в каналы транспорт больше не заводится.
+
 | Вызов | Результат |
 |---|---|
 | `create_doc(name, file_ext="txt")` → `MailruDoc` | кладёт `/openflux/<name>.txt`, публикует, возвращает `https://cloud.mail.ru/public/<A>/<B>` |

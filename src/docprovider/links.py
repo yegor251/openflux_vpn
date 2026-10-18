@@ -77,9 +77,10 @@ def make_link(
     transports.append(
         {"type": "yandex", "name": "yandex", "url": docs.yandex.url, "priority": YANDEX_PRIORITY}
     )
-    transports.append(
-        {"type": "mailru", "name": "mailru", "url": docs.mailru.url, "priority": MAILRU_PRIORITY}
-    )
+    if docs.mailru:
+        transports.append(
+            {"type": "mailru", "name": "mailru", "url": docs.mailru.url, "priority": MAILRU_PRIORITY}
+        )
     config = {
         "name": name,
         "negotiate": True,
