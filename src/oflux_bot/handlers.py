@@ -29,13 +29,15 @@ HELP_TEXT = """Команды:
 Первый вход: /start <код-приглашение> (код даёт админ).
 """
 
-DOWNLOAD_TEXT = """Как подключиться (пока заглушки — уточняй у админа):
+DOWNLOAD_TEXT = """Как подключиться:
 
+🤖 Android: https://github.com/p1neappleXpress/OpenFluxAndroid/releases
+   (свежий релиз → OpenFluxAndroid-<ver>-androidApp-arm64-v8a-release.apk;
+   разрешить установку из источника, затем /my и отсканировать QR)
 📱 iOS: TestFlight — https://testflight.apple.com/join/XXXXXXXX
    (открыть ссылку, установить, отсканировать QR из /my)
-💻 macOS: поставить CLI и конфиг из репо, затем
+💻 macOS: CLI из репо проекта, затем
    sudo ./bin/openflux --config=<конфиг-канала>
-🖥 Desktop/Android: релизы апстрима — https://github.com/p1neappleXpress/OpenFlux/releases
 """
 
 
