@@ -31,13 +31,13 @@ HELP_TEXT = """Команды:
 
 DOWNLOAD_TEXT = """Как подключиться:
 
-🤖 Android: https://github.com/p1neappleXpress/OpenFluxAndroid/releases
-   (свежий релиз → OpenFluxAndroid-<ver>-androidApp-arm64-v8a-release.apk;
-   разрешить установку из источника, затем /my и отсканировать QR)
-📱 iOS: TestFlight — https://testflight.apple.com/join/XXXXXXXX
-   (открыть ссылку, установить, отсканировать QR из /my)
+🤖 Android: github.com/p1neappleXpress/OpenFluxAndroid/releases
+   (свежий релиз → файл ...arm64-v8a-release.apk; сейчас это версия
+   3.7.0. Разрешить установку из источника, затем /my и отсканировать QR)
+📱 iOS: TestFlight — ссылка выдаётся админом
+   (открыть, установить, затем /my и отсканировать QR)
 💻 macOS: CLI из репо проекта, затем
-   sudo ./bin/openflux --config=<конфиг-канала>
+   sudo ./bin/openflux --config=конфиг-канала
 """
 
 

@@ -11,8 +11,6 @@ import logging
 import sys
 
 from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 
 from oflux_admin.config import UserRegistry
 
@@ -44,7 +42,9 @@ async def _watchdog_loop(cfg: BotConfig, bot: Bot, registry) -> None:
 
 
 async def amain(cfg: BotConfig) -> None:
-    bot = Bot(cfg.token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # plain text mode: nothing in our messages uses HTML, and any stray
+    # angle bracket would make Telegram reject the whole message
+    bot = Bot(cfg.token)
     dp = Dispatcher()
     registry = UserRegistry(cfg.registry_path)
     bot_users = BotUsers(cfg.state_path)
