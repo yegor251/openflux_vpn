@@ -36,6 +36,8 @@ def _registry(cfg: BotConfig) -> UserRegistry:
 
 def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int) -> dict:
     """Full self-service issuance for one TG user. Raises on any step."""
+    if bot_users.channel_of(tg_id):
+        raise RuntimeError("у пользователя уже есть канал")
     registry = _registry(cfg)
     server = cfg.admin.server(None)
     channel = channel_for(f"user{tg_id}")

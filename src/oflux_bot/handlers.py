@@ -53,6 +53,11 @@ def _link_message(channel: str, link: str, note: str) -> str:
 
 
 def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUsers) -> None:
+    import asyncio
+
+    # issuance is long; a double-tap must not create two channels
+    issue_lock = asyncio.Lock()
+
     def registered(message: Message) -> bool:
         return bot_users.is_registered(message.from_user.id)
 
@@ -97,13 +102,17 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
         if bot_users.channel_of(tg_id):
             await message.answer("У тебя уже есть канал: /my. Один канал на пользователя.")
             return
-        msg = await message.answer("Создаю: документ-носитель...")
-        try:
-            result = issue_channel(cfg, bot_users, tg_id)
-            await msg.edit_text("Создаю: канал на сервере...")
-        except Exception as exc:  # noqa: BLE001 - user-facing error text
-            await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
-            return
+        async with issue_lock:
+            if bot_users.channel_of(tg_id):  # re-check under the lock
+                await message.answer("У тебя уже есть канал: /my. Один канал на пользователя.")
+                return
+            msg = await message.answer("Создаю: документ-носитель...")
+            try:
+                result = issue_channel(cfg, bot_users, tg_id)
+                await msg.edit_text("Создаю: канал на сервере...")
+            except Exception as exc:  # noqa: BLE001 - user-facing error text
+                await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
+                return
         await msg.edit_text(_link_message(result["channel"], result["link"], "готов"))
         await message.answer_photo(qr_photo(result["link"]), caption="QR для приложения")
 
