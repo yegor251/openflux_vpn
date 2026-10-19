@@ -7,6 +7,7 @@
 | Статус | open, заблокировано апстримом |
 | Зависимости | CORE-07 (мониторинг), docs/WHY_MASKING.md |
 | Апстрим | #106 (headless exit без пути SmartCaptcha), #170 (потерянный сигнал external-verification) |
+| Источник | **наш опыт** (снятый лейн: WHY_MASKING.md, живые логи PoW-стен) + **апстрим-задачи** #106, #170 (тела проверены: headless-контекст и потеря `ErrCaptchaRequired`) |
 
 ## Проблема
 
