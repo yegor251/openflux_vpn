@@ -17,9 +17,9 @@ def main() -> int:
     users = BotUsers(cfg.state_path)
     me = "?"
     try:
-        import httpx
+        import requests
 
-        resp = httpx.get(f"https://api.telegram.org/bot{cfg.token}/getMe", timeout=10)
+        resp = requests.get(f"https://api.telegram.org/bot{cfg.token}/getMe", timeout=10)
         me = resp.json()["result"]["username"]
     except Exception:  # noqa: BLE001 - offline still prints tokens
         pass
