@@ -106,9 +106,12 @@ class AlertState:
 
 
 class Watchdog:
-    def __init__(self, cfg, registry, send) -> None:
+    def __init__(self, cfg, registry_source, send) -> None:
+        # registry_source: callable returning a FRESH UserRegistry — the
+        # registry file changes between cycles (bot-issued channels), a
+        # startup snapshot would probe ghosts and miss new channels.
         self.cfg = cfg
-        self.registry = registry
+        self.registry_source = registry_source
         self.send = send  # coroutine: send(text) -> None
         self.state = AlertState()
 
@@ -116,7 +119,7 @@ class Watchdog:
         import asyncio
 
         alerts: list[str] = []
-        channels = self.registry.active()
+        channels = self.registry_source().active()
         down = 0
 
         for channel, user in sorted(channels.items()):

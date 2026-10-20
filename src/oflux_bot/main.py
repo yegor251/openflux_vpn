@@ -23,7 +23,7 @@ def _log() -> logging.Logger:
     return logging.getLogger("oflux_bot")
 
 
-async def _watchdog_loop(cfg: BotConfig, bot: Bot, registry) -> None:
+async def _watchdog_loop(cfg: BotConfig, bot: Bot) -> None:
     from oflux_admin.config import UserRegistry
 
     async def send(text: str) -> None:
@@ -32,7 +32,7 @@ async def _watchdog_loop(cfg: BotConfig, bot: Bot, registry) -> None:
         except Exception as exc:  # noqa: BLE001 - alerts must never crash the loop
             _log().warning("alert delivery failed: %s", exc)
 
-    watchdog = Watchdog(cfg, registry, send)
+    watchdog = Watchdog(cfg, lambda: UserRegistry(cfg.registry_path), send)
     while True:
         try:
             await watchdog.run_once()
@@ -46,11 +46,10 @@ async def amain(cfg: BotConfig) -> None:
     # angle bracket would make Telegram reject the whole message
     bot = Bot(cfg.token)
     dp = Dispatcher()
-    registry = UserRegistry(cfg.registry_path)
     bot_users = BotUsers(cfg.state_path)
     register_handlers(dp, bot, cfg, bot_users)
 
-    asyncio.create_task(_watchdog_loop(cfg, bot, registry))
+    asyncio.create_task(_watchdog_loop(cfg, bot))
     _log().info("oflux-bot started (alert_tg_id=%s)", cfg.alert_tg_id)
     await dp.start_polling(bot)
 

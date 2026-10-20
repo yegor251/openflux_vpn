@@ -22,6 +22,16 @@ def test_unknown_invite_rejected(tmp_path):
     assert not users.claim_invite("nope", 111)
 
 
+def test_bot_users_sees_externally_added_invite(tmp_path):
+    # the invite CLI writes the file while the long-running bot holds
+    # its own BotUsers instance - the bot must see (and keep) it
+    path = tmp_path / "bot_users.json"
+    bot_view = BotUsers(path)
+    cli_view = BotUsers(path)
+    token = cli_view.new_invite()
+    assert bot_view.claim_invite(token, 555)
+
+
 def test_bind_and_channel_ownership(tmp_path):
     users = BotUsers(tmp_path / "bot_users.json")
     token = users.new_invite()

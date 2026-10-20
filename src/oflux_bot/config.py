@@ -73,6 +73,10 @@ class BotUsers:
 
     Kept separate from the channel registry (users.json): a registered
     TG user may exist before their channel is issued.
+
+    The file has several writers (this bot, the invite CLI, drills), so
+    every public operation re-reads it — a startup snapshot would both
+    miss new invites and clobber them on the next save.
     """
 
     VERSION = 1
@@ -91,6 +95,9 @@ class BotUsers:
         data.setdefault("invites", {})  # token -> {"created": iso, "tg_id": int|None}
         return data
 
+    def _reload(self) -> None:
+        self._data = self._load()
+
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
@@ -99,6 +106,7 @@ class BotUsers:
     # -- invites -------------------------------------------------------------
 
     def new_invite(self) -> str:
+        self._reload()
         token = secrets.token_urlsafe(12)
         self._data["invites"][token] = {
             "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -109,6 +117,7 @@ class BotUsers:
 
     def claim_invite(self, token: str, tg_id: int) -> bool:
         """Bind a fresh invite to tg_id. A used invite never re-binds."""
+        self._reload()
         invite = self._data["invites"].get(token)
         if invite is None or invite["tg_id"] is not None:
             return False
@@ -118,26 +127,31 @@ class BotUsers:
         return True
 
     def is_registered(self, tg_id: int) -> bool:
+        self._reload()
         return str(tg_id) in self._data["users"]
 
     # -- bindings ------------------------------------------------------------
 
     def channel_of(self, tg_id: int) -> str | None:
+        self._reload()
         user = self._data["users"].get(str(tg_id))
         return user.get("channel") if user else None
 
     def bind_channel(self, tg_id: int, channel: str) -> None:
+        self._reload()
         self._data["users"].setdefault(str(tg_id), {"channel": None, "invite": None})
         self._data["users"][str(tg_id)]["channel"] = channel
         self.save()
 
     def unbind(self, tg_id: int) -> None:
+        self._reload()
         user = self._data["users"].get(str(tg_id))
         if user:
             user["channel"] = None
             self.save()
 
     def channels_per_user(self, tg_id: int) -> int:
+        self._reload()
         return sum(
             1
             for u in self._data["users"].values()
@@ -145,6 +159,7 @@ class BotUsers:
         )
 
     def channel_owner(self, channel: str) -> int | None:
+        self._reload()
         for tg_id, user in self._data["users"].items():
             if user.get("channel") == channel:
                 return int(tg_id)
