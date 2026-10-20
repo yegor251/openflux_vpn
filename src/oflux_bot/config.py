@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,6 +12,11 @@ from pathlib import Path
 import yaml
 
 from oflux_admin.config import AdminConfig, load_config
+
+
+def bot_config_dir() -> Path:
+    """Config dir of the bot host; override for drills (SRV-04)."""
+    return Path(os.environ.get("OFLUX_BOT_CONFIG_DIR", "~/.config/oflux-bot")).expanduser()
 
 
 @dataclass(frozen=True)
@@ -22,7 +28,7 @@ class BotConfig:
 
     @property
     def config_dir(self) -> Path:
-        return Path("~/.config/oflux-bot").expanduser()
+        return bot_config_dir()
 
     @property
     def registry_path(self) -> Path:
@@ -37,8 +43,9 @@ class BotConfig:
         return self.config_dir / "bot_users.json"
 
 
-def load_bot_config(path: str | Path = "~/.config/oflux-bot/bot.yaml") -> BotConfig:
-    raw = yaml.safe_load(Path(path).expanduser().read_text(encoding="utf-8")) or {}
+def load_bot_config(path: str | Path | None = None) -> BotConfig:
+    path = path or bot_config_dir() / "bot.yaml"
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     admin = load_config(Path(raw.get("servers_yaml", "~/.config/oflux-bot/servers.yaml")).expanduser())
     token = raw.get("bot_token", "")
     alert_tg_id = int(raw.get("alert_tg_id", 0))

@@ -1,7 +1,9 @@
 """oflux_bot pure logic: invite tokens, alert dedup, link masking."""
 
-from oflux_bot.alerts import AlertState
-from oflux_bot.config import BotUsers, mask_link
+import os
+
+from oflux_bot.alerts import BACKUP_MAX_AGE_S, AlertState, probe_backup
+from oflux_bot.config import BotUsers, bot_config_dir, mask_link
 
 
 # -- invite tokens / bindings ------------------------------------------------
@@ -70,3 +72,21 @@ def test_mask_link_hides_key():
     assert mask_link("openflux://v1/AbCdEf") == "openflux://v1/<redacted>"
     assert "AbCdEf" not in mask_link("openflux://v1/AbCdEf")
     assert mask_link("not-a-link").startswith("not-a-link")
+
+
+# -- backup freshness (SRV-04) -------------------------------------------------
+
+def test_backup_probe_staleness(tmp_path):
+    now = 1_000_000.0
+    assert probe_backup(tmp_path, now=now) is False  # no stamp at all
+    stamp = tmp_path / ".last-backup"
+    stamp.write_text("")
+    os.utime(stamp, (now, now))
+    assert probe_backup(tmp_path, now=now) is True  # fresh stamp
+    os.utime(stamp, (now - BACKUP_MAX_AGE_S - 1, now - BACKUP_MAX_AGE_S - 1))
+    assert probe_backup(tmp_path, now=now) is False  # too old
+
+
+def test_config_dir_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFLUX_BOT_CONFIG_DIR", str(tmp_path))
+    assert bot_config_dir() == tmp_path

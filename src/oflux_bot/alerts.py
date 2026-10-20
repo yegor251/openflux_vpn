@@ -15,11 +15,13 @@ from __future__ import annotations
 import socket
 import subprocess
 import time
+from pathlib import Path
 
 COOLDOWN_S = 3600
 K_FAILS = 3
 M_OKS = 2
 CHECK_INTERVAL_S = 300
+BACKUP_MAX_AGE_S = 36 * 3600  # daily cron on the admin machine + slack
 
 
 def probe_unit(channel: str) -> bool:
@@ -50,6 +52,16 @@ def probe_cookies(cookies_path, doc_url: str) -> bool:
         return True
     except Exception:  # noqa: BLE001 - any probe error counts as stale
         return False
+
+
+def probe_backup(config_dir, now: float | None = None) -> bool:
+    """True while the .last-backup stamp (touched by a successful pull
+    on the admin machine) is fresh enough."""
+    try:
+        mtime = (Path(config_dir) / ".last-backup").stat().st_mtime
+    except OSError:
+        return False
+    return (time.time() if now is None else now) - mtime <= BACKUP_MAX_AGE_S
 
 
 class AlertState:
@@ -148,3 +160,16 @@ class Watchdog:
                 await self.send("🟠 напоминание: куки всё ещё протухли")
             elif action == "clear":
                 await self.send("🟢 яндекс-куки снова живы")
+
+        # registry backups: stamped by the admin machine's daily pull
+        healthy = probe_backup(self.cfg.config_dir)
+        action = self.state.feed("backup", healthy)
+        if action == "alert":
+            await self.send(
+                "📭 Бэкап реестра не снимался больше 36 ч. На машине админа: "
+                "scripts/backup_registry.sh pull"
+            )
+        elif self.state.active.get("backup") and self.state.repeat_due("backup"):
+            await self.send("📭 напоминание: бэкап реестра всё ещё не снимался")
+        elif action == "clear":
+            await self.send("🟢 бэкап реестра снова свежий")
