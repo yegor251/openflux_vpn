@@ -127,6 +127,7 @@ class BotUsers:
         return user.get("channel") if user else None
 
     def bind_channel(self, tg_id: int, channel: str) -> None:
+        self._data["users"].setdefault(str(tg_id), {"channel": None, "invite": None})
         self._data["users"][str(tg_id)]["channel"] = channel
         self.save()
 
