@@ -80,12 +80,12 @@ cmd_drill() {
     require_key
     local archive="${1:-$(latest_archive)}"
     [ -n "$archive" ] || { echo "нет архивов в $BACKUP_DIR" >&2; exit 1; }
-    local tmp
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
-    dec -in "$archive" | tar -xzf - -C "$tmp"
+    # NOTE: global, not local - the EXIT trap must still see it after return
+    DRILL_TMP="$(mktemp -d)"
+    trap 'rm -rf "$DRILL_TMP"' EXIT
+    dec -in "$archive" | tar -xzf - -C "$DRILL_TMP"
     ssh "$VPS" "rm -rf /tmp/oflux-restore-drill && mkdir -p /tmp/oflux-restore-drill && chmod 700 /tmp/oflux-restore-drill"
-    scp -q -p "$tmp"/* "$VPS:/tmp/oflux-restore-drill/"
+    scp -q -p "$DRILL_TMP"/* "$VPS:/tmp/oflux-restore-drill/"
     # read-only drill on the VPS: restored config must reissue real links
     ssh "$VPS" "cd /root/openflux_vpn && OFLUX_BOT_CONFIG_DIR=/tmp/oflux-restore-drill .venv/bin/python scripts/restore_drill.py"
     ssh "$VPS" "rm -rf /tmp/oflux-restore-drill"
