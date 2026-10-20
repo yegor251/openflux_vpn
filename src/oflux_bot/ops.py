@@ -34,15 +34,16 @@ def _registry(cfg: BotConfig) -> UserRegistry:
     return UserRegistry(cfg.registry_path)
 
 
-def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int) -> dict:
+def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: str | None = None) -> dict:
     """Full self-service issuance for one TG user. Raises on any step."""
     if bot_users.channel_of(tg_id):
         raise RuntimeError("у пользователя уже есть канал")
     registry = _registry(cfg)
     server = cfg.admin.server(None)
-    channel = channel_for(f"user{tg_id}")
+    base = name_base or f"user{tg_id}"
+    channel = channel_for(base)
     while registry.get(channel):
-        channel = channel_for(f"user{tg_id}-{secrets.token_hex(2)}")
+        channel = channel_for(f"{base}-{secrets.token_hex(2)}")
     if registry.active_count(server.name) >= server.max_channels:
         raise RuntimeError("сервер переполнен, попробуйте позже")
 
