@@ -2,12 +2,17 @@
 
 Probes (all local to the bot's VPS):
   - cookie session: live probe against the first carrier doc;
-  - per channel: systemctl is-active + 127.0.0.1:<port> connect.
+  - per channel: systemctl is-active + 127.0.0.1:<port> connect;
+  - registry backup stamp touched by the admin machine's daily pull.
 
 Anti-flap: a channel alerts after K consecutive failures and clears
 after M consecutive successes. A mass failure (>= 50% down) collapses
 into ONE aggregated alert. Repeat alerts per type cool down for
 cooldown seconds. Death of the VPS itself alerts nobody (bot is on it).
+
+send(text) -> bool: an undelivered alert must not consume its state
+transition — the watchdog rolls the flag back and retries the next
+cycle, so a Telegram outage delays alerts instead of swallowing them.
 """
 
 from __future__ import annotations
@@ -110,15 +115,14 @@ class Watchdog:
         # registry_source: callable returning a FRESH UserRegistry — the
         # registry file changes between cycles (bot-issued channels), a
         # startup snapshot would probe ghosts and miss new channels.
+        # send(text) -> bool: False = not delivered, roll back and retry.
         self.cfg = cfg
         self.registry_source = registry_source
-        self.send = send  # coroutine: send(text) -> None
+        self.send = send
         self.state = AlertState()
 
     async def run_once(self) -> None:
-        import asyncio
-
-        alerts: list[str] = []
+        pending: list[tuple[str, str, str]] = []  # (kind, state_key, text)
         channels = self.registry_source().active()
         down = 0
 
@@ -127,27 +131,36 @@ class Watchdog:
             down += 0 if healthy else 1
             action = self.state.feed(f"channel:{channel}", healthy)
             if action == "alert":
-                alerts.append(f"🔴 канал {channel} недоступен (порт {user['port']})")
+                pending.append((
+                    "alert", f"channel:{channel}",
+                    f"🔴 канал {channel} недоступен (порт {user['port']})",
+                ))
             elif action == "clear":
-                alerts.append(f"🟢 канал {channel} восстановился")
+                pending.append((
+                    "clear", f"channel:{channel}",
+                    f"🟢 канал {channel} восстановился",
+                ))
 
         # mass failure: one aggregated alert instead of per-channel spam
         mass_key = "mass"
         if channels and down * 2 >= len(channels) and down >= 2:
             if not self.state.active.get(mass_key):
-                self.state.active[mass_key] = True
-                self.state.last_sent[mass_key] = time.time()
-                await self.send(
+                if await self.send(
                     f"🚨 МАССОВЫЙ СБОЙ: недоступны {down} из {len(channels)} каналов — "
                     "похоже на проблему VPS или вышестоящей сети"
-                )
+                ):
+                    self.state.active[mass_key] = True
+                    self.state.last_sent[mass_key] = time.time()
                 return  # individual alerts folded into the aggregate
         elif self.state.active.get(mass_key) and down == 0:
-            self.state.active[mass_key] = False
-            await self.send("🟢 массовый сбой прошёл: все каналы доступны")
+            if await self.send("🟢 массовый сбой прошёл: все каналы доступны"):
+                self.state.active[mass_key] = False
 
-        for text in alerts:
-            await self.send(text)
+        for kind, key, text in pending:
+            if await self.send(text):
+                continue
+            # not delivered: undo the transition so it retries next cycle
+            self.state.active[key] = kind == "clear"
 
         # cookies: one shared session for doc creation
         url = next((u["yandex_url"] for u in channels.values() if u.get("yandex_url")), None)
@@ -155,24 +168,30 @@ class Watchdog:
             healthy = probe_cookies(self.cfg.cookies_path, url)
             action = self.state.feed("cookies", healthy)
             if action == "alert":
-                await self.send(
+                if not await self.send(
                     "🟠 Яндекс-куки протухли: /issue не работает. Нужен свежий "
                     "экспорт (скилл refresh-cookies на машине админа)."
-                )
+                ):
+                    self.state.active["cookies"] = False
             elif self.state.active.get("cookies") and self.state.repeat_due("cookies"):
-                await self.send("🟠 напоминание: куки всё ещё протухли")
+                if not await self.send("🟠 напоминание: куки всё ещё протухли"):
+                    self.state.last_sent["cookies"] = 0.0
             elif action == "clear":
-                await self.send("🟢 яндекс-куки снова живы")
+                if not await self.send("🟢 яндекс-куки снова живы"):
+                    self.state.active["cookies"] = True
 
         # registry backups: stamped by the admin machine's daily pull
         healthy = probe_backup(self.cfg.config_dir)
         action = self.state.feed("backup", healthy)
         if action == "alert":
-            await self.send(
+            if not await self.send(
                 "📭 Бэкап реестра не снимался больше 36 ч. На машине админа: "
                 "scripts/backup_registry.sh pull"
-            )
+            ):
+                self.state.active["backup"] = False
         elif self.state.active.get("backup") and self.state.repeat_due("backup"):
-            await self.send("📭 напоминание: бэкап реестра всё ещё не снимался")
+            if not await self.send("📭 напоминание: бэкап реестра всё ещё не снимался"):
+                self.state.last_sent["backup"] = 0.0
         elif action == "clear":
-            await self.send("🟢 бэкап реестра снова свежий")
+            if not await self.send("🟢 бэкап реестра снова свежий"):
+                self.state.active["backup"] = True

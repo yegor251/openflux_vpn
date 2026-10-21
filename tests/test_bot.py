@@ -76,6 +76,41 @@ def test_repeat_reminder_only_after_cooldown():
     assert st.repeat_due("cookies", now=3601 + 3)  # cooldown passed
 
 
+# -- watchdog delivery rollback (telegram outage must not eat alerts) --------
+
+def test_mass_alert_retries_until_delivered(monkeypatch):
+    import asyncio
+
+    from oflux_bot import alerts
+
+    class FakeRegistry:
+        def active(self):
+            return {"a": {"port": 1}, "b": {"port": 2}}
+
+    monkeypatch.setattr(alerts, "probe_unit", lambda ch: False)
+    monkeypatch.setattr(alerts, "probe_port", lambda p: False)
+
+    sent: list[str] = []
+    attempts = {"n": 0}
+
+    async def flaky_send(text):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return False  # first mass alert is "lost" in an outage
+        sent.append(text)
+        return True
+
+    wd = alerts.Watchdog(None, FakeRegistry, flaky_send)
+
+    asyncio.run(wd.run_once())  # delivery failed: must NOT latch active
+    assert wd.state.active.get("mass") is not True
+    assert sent == []
+
+    asyncio.run(wd.run_once())  # connectivity back: exactly one 🚨 goes out
+    assert wd.state.active["mass"] is True
+    assert len([s for s in sent if "МАССОВЫЙ" in s]) == 1
+
+
 # -- link masking ------------------------------------------------------------
 
 def test_mask_link_hides_key():

@@ -26,11 +26,13 @@ def _log() -> logging.Logger:
 async def _watchdog_loop(cfg: BotConfig, bot: Bot) -> None:
     from oflux_admin.config import UserRegistry
 
-    async def send(text: str) -> None:
+    async def send(text: str) -> bool:
         try:
             await bot.send_message(cfg.alert_tg_id, text)
+            return True
         except Exception as exc:  # noqa: BLE001 - alerts must never crash the loop
             _log().warning("alert delivery failed: %s", exc)
+            return False
 
     watchdog = Watchdog(cfg, lambda: UserRegistry(cfg.registry_path), send)
     while True:
@@ -51,7 +53,14 @@ async def amain(cfg: BotConfig) -> None:
 
     asyncio.create_task(_watchdog_loop(cfg, bot))
     _log().info("oflux-bot started (alert_tg_id=%s)", cfg.alert_tg_id)
-    await dp.start_polling(bot)
+    # Telegram outages must degrade to "retry", never kill the process
+    while True:
+        try:
+            await dp.start_polling(bot)
+            break  # clean shutdown (signal)
+        except Exception as exc:  # noqa: BLE001
+            _log().warning("polling failed (%s), retrying in 15 s", exc)
+            await asyncio.sleep(15)
 
 
 def main() -> int:
