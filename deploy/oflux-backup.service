@@ -1,0 +1,6 @@
+[Unit]
+Description=Backup oflux-bot state (registry, cookies) on this VPS
+
+[Service]
+Type=oneshot
+ExecStart=/root/openflux_vpn/scripts/vps_backup.sh

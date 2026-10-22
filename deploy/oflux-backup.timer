@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily oflux-bot state backup
+
+[Timer]
+OnCalendar=*-*-* 15:40:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

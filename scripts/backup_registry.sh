@@ -77,6 +77,20 @@ cmd_verify() {
 }
 
 cmd_drill() {
+    if [ "${1:-}" = "vps" ]; then
+        # drill against the latest on-VPS archive (plain tar, vps_backup.sh)
+        ssh "$VPS" '
+            set -e
+            latest=$(ls -1t /root/backups/oflux-bot/oflux-bot-*.tar.gz 2>/dev/null | head -1)
+            [ -n "$latest" ] || { echo "нет архивов в /root/backups/oflux-bot" >&2; exit 1; }
+            rm -rf /tmp/oflux-restore-drill && mkdir -p /tmp/oflux-restore-drill && chmod 700 /tmp/oflux-restore-drill
+            tar -xzf "$latest" -C /tmp/oflux-restore-drill
+            cd /root/openflux_vpn && OFLUX_BOT_CONFIG_DIR=/tmp/oflux-restore-drill .venv/bin/python scripts/restore_drill.py
+            rm -rf /tmp/oflux-restore-drill
+        '
+        return
+    fi
+    require_key
     require_key
     local archive="${1:-$(latest_archive)}"
     [ -n "$archive" ] || { echo "нет архивов в $BACKUP_DIR" >&2; exit 1; }
@@ -97,7 +111,7 @@ case "${1:-}" in
     verify) shift; cmd_verify "$@" ;;
     drill)  shift; cmd_drill "$@" ;;
     *)
-        echo "usage: $0 init | pull | verify [file] | drill [file]" >&2
+        echo "usage: $0 init | pull | verify [file] | drill [file] | drill vps" >&2
         exit 2
         ;;
 esac
