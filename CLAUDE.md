@@ -66,23 +66,28 @@ l3 (UDP NAT) этот стенд НЕ проверяет — только жив
 
 ## Интеграция с OpenFlux
 
-- `OpenFlux/` — одноразовый референс-клон; в него не коммитить, он
-  пересоздаётся `scripts/update_openflux.sh` (он же пересобирает
-  `bin/openflux`, `bin/openflux-linux` и пере-форкает инсталлятор через
-  `deploy/make_fork.py`).
+- Источник ядра с 2026-10-22 — наш форк `yegor251/OpenFlux`: `main`
+  форка — зеркало апстрима, **из него не собирать**; рабочий код — в
+  ветках (пример: `feature/direct-lane-guard` = PR #212).
+  `OpenFlux/` — одноразовый чекаут ветки, пересоздаётся
+  `scripts/update_openflux.sh build <branch>` (он же собирает
+  `bin/openflux(.linux)` и пере-форкает инсталлятор через
+  `deploy/make_fork.py`). Dev-клон с ремоутами:
+  `~/PycharmProjects/OpenFlux-contrib` (origin=форк,
+  upstream=апстрим); конфликт ребейза = громкое падение, разрешать
+  руками.
 - Кодек ссылок НЕ переизобретать: только subprocess бинаря
   (`--make-link` / `--parse-link`), см. `src/docprovider/links.py`.
 - `deploy/node-install.sh` — генерируется `deploy/make_fork.py` из
   апстрима (заякоренные патчи, drift падает громко). Руками не править —
   править патчи в `make_fork.py`. Наши ключи: `yandex=`, `mode=`.
-- Ядро ноды обновляется ВРУЧНУЮ (с 2026-10-20, решение A в SRV-06:
-  авто-таймер `openflux-node-update.timer` выключен — каждый рестарт
-  канала зомбифицирует живых клиентов, пока апстрим не починит
-  CORE-02/03). Процедура: посмотреть node-v* релиз → согласовать окно
-  с юзерами → `ssh root@159.194.227.248 'systemctl start
-  openflux-node-update.service'` → все юниты `openflux-node@*` должны
-  быть active → написать юзерам перезапустить клиентов. `upgrade` НЕ
-  трогает node.conf каналов.
+- Ядро ноды обновляется ВРУЧНУЮ из нашего форка (с 2026-10-22;
+  авто-таймер апстрима выключен, SRV-06 A): скилл `deploy-core`
+  (спрашивает актуальную ветку) или руками
+  `scripts/update_openflux.sh sync|build|deploy <branch>`. На VPS
+  бинарь подключён симлинком `openflux → openflux-<sha>`, откат —
+  `ln -sfn` на прошлую цель (заводская — `openflux-node-v1.4.2`).
+  `upgrade` НЕ трогает node.conf каналов.
 
 ## Оркестратор (oflux-admin)
 
