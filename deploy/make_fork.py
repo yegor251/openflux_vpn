@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Generate our node-install.sh fork from a fresh upstream copy.
 
-Our fork adds, on top of the stock installer:
-  - the `yandex=` carrier key (plain Yandex.Docs WebSocket transport,
-    anonymous, PoW auto-solved);
-  - the `mode=` key (l3/l4, default l4 as upstream). l3 additionally
-    installs an idempotent iptables rule against kernel RSTs plus a
-    oneshot systemd unit re-adding it at boot.
+Two supported lines (auto-detected):
+
+- **team line** (`OpenFluxTeam/OpenFlux`, our production source since
+  2026-10-23): ships `mode=`, `YANDEX=`, `COOKIES=`, l3 drop-ins and an
+  RST oneshot natively. The ONLY thing it gets wrong is the RST rule
+  order: it appends (`iptables -A`), which under ufw never sees the
+  packets (the built-in chains ACCEPT ctstate NEW first) — our live
+  finding of 2026-10-18. One patch: insert first.
+- **main line** (`p1neappleXpress/OpenFlux`): everything below in
+  PATCHES.
 
 This script re-applies the patches to a freshly updated
 `OpenFlux/deploy/node-install.sh`, so upstream changes are picked up
@@ -149,10 +153,34 @@ PROBES = (
     "[Transport yandex]",
 )
 
+# The team line (OpenFluxTeam/OpenFlux, 0.14+/node-v1.7+) ships our old
+# fork features natively; the single divergence is the RST rule order.
+TEAM_PROBE = "write_l3_helper"
+TEAM_PATCHES = [
+    (
+        "rst-insert-first",
+        "    add) iptables -C $rule 2>/dev/null || iptables -A $rule ;;",
+        "    # insert FIRST: under ufw the built-in OUTPUT chains ACCEPT\n"
+        "    # ctstate NEW before any appended rule, so -A never sees the RSTs\n"
+        '    add) iptables -C $rule 2>/dev/null || iptables -I OUTPUT 1 -p tcp --tcp-flags RST RST -s "$ip" -j DROP ;;',
+    ),
+]
+TEAM_PROBES = (
+    "iptables -I OUTPUT 1 -p tcp --tcp-flags RST RST",
+    "[Transport yandex]",
+    "AmbientCapabilities=CAP_NET_RAW",
+    "yandex=*) YANDEX=",
+    "Mode = ${MODE:-l4}",
+)
+
 
 def build_fork(upstream_text: str) -> str:
+    if TEAM_PROBE in upstream_text:
+        patches, probes = TEAM_PATCHES, TEAM_PROBES
+    else:
+        patches, probes = PATCHES, PROBES
     text = upstream_text
-    for pid, old, new in PATCHES:
+    for pid, old, new in patches:
         count = text.count(old)
         if count != 1:
             sys.exit(
@@ -160,6 +188,8 @@ def build_fork(upstream_text: str) -> str:
                 "Upstream node-install.sh changed — rework deploy/make_fork.py."
             )
         text = text.replace(old, new, 1)
+    for probe in probes:
+        assert probe in text, f"post-check failed: {probe!r} missing"
     return text
 
 
@@ -170,9 +200,6 @@ def main() -> int:
 
     upstream = UPSTREAM.read_text(encoding="utf-8")
     forked = build_fork(upstream)
-
-    for probe in PROBES:
-        assert probe in forked, f"post-check failed: {probe!r} missing"
 
     if args.check:
         if FORK.exists() and FORK.read_text(encoding="utf-8") == forked:

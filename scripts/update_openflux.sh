@@ -10,7 +10,9 @@
 #                                      conflicts abort loudly - resolve by
 #                                      hand in ~/PycharmProjects/OpenFlux-contrib
 #   update_openflux.sh build <branch>  refresh the throwaway OpenFlux/
-#                                      checkout from fork@branch, build
+#                                      checkout from BUILD_REPO@branch
+#                                      (default: OpenFluxTeam/OpenFlux - the
+#                                      production line), build
 #                                      bin/openflux(+.linux), re-fork the
 #                                      installer, stamp bin/.core-build-info
 #   update_openflux.sh deploy          upload the built core, switch the
@@ -23,6 +25,10 @@ cd "$(dirname "$0")/.."
 
 FORK="${OFLUX_FORK:-yegor251/OpenFlux}"
 UPSTREAM="p1neappleXpress/OpenFlux"
+# The line we actually RUN in production (pinned by commit at build time).
+# The team line is ahead of p1neappleXpress main and is the official next
+# release; contribution flow (sync/PRs) still targets the fork + UPSTREAM.
+BUILD_REPO="${OFLUX_BUILD_REPO:-OpenFluxTeam/OpenFlux}"
 CONTRIB="${HOME}/PycharmProjects/OpenFlux-contrib"
 VPS="${OFLUX_VPS:-root@159.194.227.248}"
 NODE_DIR="/opt/openflux-node/bin"
@@ -54,13 +60,14 @@ cmd_sync() {
 cmd_build() {
     local branch="$1"
     rm -rf OpenFlux
-    git clone --depth 1 -b "$branch" "https://github.com/${FORK}.git" OpenFlux
+    git clone --depth 1 -b "$branch" "https://github.com/${BUILD_REPO}.git" OpenFlux
     echo "source: $(git -C OpenFlux log --oneline -1)"
     (cd OpenFlux && go build -o ../bin/openflux .)
     (cd OpenFlux && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -trimpath -o ../bin/openflux-linux .)
     python3 deploy/make_fork.py
     sh -n deploy/node-install.sh
     {
+        echo "repo=$BUILD_REPO"
         echo "branch=$branch"
         echo "commit=$(git -C OpenFlux rev-parse HEAD)"
         echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

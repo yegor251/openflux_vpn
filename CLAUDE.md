@@ -66,16 +66,16 @@ l3 (UDP NAT) этот стенд НЕ проверяет — только жив
 
 ## Интеграция с OpenFlux
 
-- Источник ядра с 2026-10-22 — наш форк `yegor251/OpenFlux`: `main`
-  форка — зеркало апстрима, **из него не собирать**; рабочий код — в
-  ветках (пример: `feature/direct-lane-guard` = PR #212).
-  `OpenFlux/` — одноразовый чекаут ветки, пересоздаётся
-  `scripts/update_openflux.sh build <branch>` (он же собирает
-  `bin/openflux(.linux)` и пере-форкает инсталлятор через
-  `deploy/make_fork.py`). Dev-клон с ремоутами:
-  `~/PycharmProjects/OpenFlux-contrib` (origin=форк,
-  upstream=апстрим); конфликт ребейза = громкое падение, разрешать
-  руками.
+- Источник ядра для ПРОДА с 2026-10-23 — линия **`OpenFluxTeam/OpenFlux`**
+  (решение админа: оригинальный main апстрима отстаёт; team-линия —
+  официальная следующая версия, мержится в main без конфликтов).
+  `update_openflux.sh build <branch>` собирает из `BUILD_REPO`
+  (пин по коммиту в `bin/.core-build-info` и
+  `/opt/openflux-node/CORE-VERSION` на VPS). Вклад (PR/issue) — по-прежнему
+  через наш форк `yegor251/OpenFlux` против `p1neappleXpress` main:
+  `update_openflux.sh sync <branch>`. `OpenFlux/` — одноразовый чекаут,
+  не коммитить. Dev-клон: `~/PycharmProjects/OpenFlux-contrib`; конфликт
+  ребейза = громкое падение, разрешать руками.
 - Кодек ссылок НЕ переизобретать: только subprocess бинаря
   (`--make-link` / `--parse-link`), см. `src/docprovider/links.py`.
 - `deploy/node-install.sh` — генерируется `deploy/make_fork.py` из
