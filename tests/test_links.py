@@ -103,3 +103,22 @@ def test_secret_too_short_rejected(binary):
             docs=DOCS,
             binary=binary,
         )
+
+
+def test_make_link_cups_only(binary):
+    """Carrier-product link: cupsonline only, no client leg to the VDS."""
+    from docprovider.cupsrooms import pack_rooms
+
+    rooms = pack_rooms(["11111111-2222-3333-4444-555555555555"])
+    link = make_link(
+        name="of-cups",
+        secret="unit-test-secret-0123456789abcdef",
+        cups_url=rooms,
+        binary=binary,
+    )
+    config = parse_link(link, binary=binary)
+    assert len(config["transports"]) == 1
+    t = config["transports"][0]
+    assert t["type"] == "cupsonline"
+    assert t["url"] == rooms
+    assert "direct" not in {x["type"] for x in config["transports"]}

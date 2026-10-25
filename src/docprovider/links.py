@@ -59,28 +59,37 @@ def make_link(
     *,
     name: str,
     secret: str,
-    docs: ChannelDocs,
+    docs: ChannelDocs | None = None,
     direct_dial: str | None = None,
+    cups_url: str | None = None,
     binary: str | None = None,
 ) -> str:
     """Compose the user-facing openflux:// link for one channel.
 
     The l3/l4 backend is chosen by the exit node, not the link, so it is
     not part of the payload (share.Config mode is only for phpbox stream).
+    Carrier-product channels pass cups_url and neither docs nor
+    direct_dial: the link then carries the cupsonline carrier only, so
+    no client leg ever touches the VDS address.
     """
     binary = find_binary(binary)
     transports: list[dict] = []
+    if cups_url:
+        transports.append(
+            {"type": "cupsonline", "name": "cupsonline", "url": cups_url, "priority": 100}
+        )
     if direct_dial:
         transports.append(
             {"type": "direct", "name": "direct", "dial": direct_dial, "priority": DIRECT_PRIORITY}
         )
-    transports.append(
-        {"type": "yandex", "name": "yandex", "url": docs.yandex.url, "priority": YANDEX_PRIORITY}
-    )
-    if docs.mailru:
+    if docs:
         transports.append(
-            {"type": "mailru", "name": "mailru", "url": docs.mailru.url, "priority": MAILRU_PRIORITY}
+            {"type": "yandex", "name": "yandex", "url": docs.yandex.url, "priority": YANDEX_PRIORITY}
         )
+        if docs.mailru:
+            transports.append(
+                {"type": "mailru", "name": "mailru", "url": docs.mailru.url, "priority": MAILRU_PRIORITY}
+            )
     config = {
         "name": name,
         "negotiate": True,

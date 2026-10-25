@@ -22,6 +22,7 @@ from docprovider import (
     make_link,
     parse_link,
 )
+from docprovider.cupsrooms import create_rooms, pack_rooms
 from oflux_admin.channels import channel_for
 from oflux_admin.config import UserRegistry
 from oflux_admin.localops import LocalOps
@@ -35,7 +36,13 @@ def _registry(cfg: BotConfig) -> UserRegistry:
 
 
 def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: str | None = None) -> dict:
-    """Full self-service issuance for one TG user. Raises on any step."""
+    """Full self-service issuance for one TG user. Raises on any step.
+
+    Carrier-product channels (admin decision 2026-10-25, memory
+    carrier-only-product): the link and the node carry the cupsonline
+    carrier only — rooms are created anonymously here, no Yandex doc,
+    no cookies, and the client never dials the VDS (the node keeps its
+    direct listener for admin drills alone)."""
     if bot_users.channel_of(tg_id):
         raise RuntimeError("у пользователя уже есть канал")
     registry = _registry(cfg)
@@ -47,8 +54,7 @@ def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: st
     if registry.active_count(server.name) >= server.max_channels:
         raise RuntimeError("сервер переполнен, попробуйте позже")
 
-    yandex = YandexDocCreator(YandexAccount(id="bot", cookies_path=str(cfg.cookies_path)))
-    ya = yandex.create(channel)
+    rooms = pack_rooms(create_rooms())
 
     key = secrets.token_hex(32)
     port = registry.alloc_port(server)
@@ -57,16 +63,14 @@ def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: st
     prov.sync_installer()
     prov.probe()
     conf = build_channel_config(
-        channel=channel, key=key, port=port, yandex_url=ya.url, mode="l3"
+        channel=channel, key=key, port=port, cupsonline=rooms, mode="l3"
     )
     result = prov.apply(channel, conf)
 
-    docs = ChannelDocs(name=channel, yandex=ya)
     link = make_link(
         name=channel,
         secret=key,
-        docs=docs,
-        direct_dial=f"{server.host}:{result.get('port', port)}",
+        cups_url=rooms,
         binary=cfg.admin.settings.openflux_bin,
     )
     parse_link(link, binary=cfg.admin.settings.openflux_bin)
@@ -79,8 +83,7 @@ def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: st
         port=port_final,
         vds=server.name,
         host=server.host,
-        yandex_url=ya.url,
-        yandex_path=ya.path,
+        cups_url=rooms,
         link=link,
         tg_id=tg_id,
         created=_now(),
@@ -99,7 +102,11 @@ def reissue_link(cfg: BotConfig, channel: str) -> str:
 
 
 def rotate_channel(cfg: BotConfig, channel: str) -> dict:
-    """New key on the VDS + new link. Old link dies."""
+    """New key on the VDS + new link. Old link dies.
+
+    Room lists survive rotation on purpose: cups rooms have no key
+    inside, re-creating them would invalidate every imported profile
+    for nothing."""
     registry = _registry(cfg)
     user = registry.get(channel)
     if not user or user.get("revoked"):
@@ -111,25 +118,42 @@ def rotate_channel(cfg: BotConfig, channel: str) -> dict:
     prov.sync_installer()
     mode = prov.channel_mode(channel)
     prov.remove(channel)
-    conf = build_channel_config(
-        channel=channel,
-        key=new_key,
-        port=user["port"],
-        yandex_url=user["yandex_url"],
-        mode=mode,
-    )
+    if user.get("cups_url"):
+        conf = build_channel_config(
+            channel=channel,
+            key=new_key,
+            port=user["port"],
+            cupsonline=user["cups_url"],
+            mode=mode,
+        )
+    else:
+        conf = build_channel_config(
+            channel=channel,
+            key=new_key,
+            port=user["port"],
+            yandex_url=user["yandex_url"],
+            mode=mode,
+        )
     result = prov.apply(channel, conf)
 
-    docs = ChannelDocs(
-        name=channel, yandex=type("D", (), {"url": user["yandex_url"]})()
-    )
-    link = make_link(
-        name=channel,
-        secret=new_key,
-        docs=docs,
-        direct_dial=f"{user['host']}:{result.get('port', user['port'])}",
-        binary=cfg.admin.settings.openflux_bin,
-    )
+    if user.get("cups_url"):
+        link = make_link(
+            name=channel,
+            secret=new_key,
+            cups_url=user["cups_url"],
+            binary=cfg.admin.settings.openflux_bin,
+        )
+    else:
+        docs = ChannelDocs(
+            name=channel, yandex=type("D", (), {"url": user["yandex_url"]})()
+        )
+        link = make_link(
+            name=channel,
+            secret=new_key,
+            docs=docs,
+            direct_dial=f"{user['host']}:{result.get('port', user['port'])}",
+            binary=cfg.admin.settings.openflux_bin,
+        )
     parse_link(link, binary=cfg.admin.settings.openflux_bin)
     registry.update(channel, key=new_key, link=link, rotated=_now())
     return {"link": link, "port": int(result.get("port", user["port"]))}
@@ -151,12 +175,13 @@ def revoke_channel(cfg: BotConfig, bot_users: BotUsers, channel: str, tg_id: int
     except RuntimeError as exc:
         errors.append(f"vds: {exc}")
 
-    try:
-        YandexDocCreator(YandexAccount(id="bot", cookies_path=str(cfg.cookies_path))).unpublish(
-            user["yandex_path"]
-        )
-    except Exception as exc:  # noqa: BLE001 - known limitation (README)
-        errors.append(f"yandex unpublish: {exc}")
+    if user.get("yandex_path"):
+        try:
+            YandexDocCreator(YandexAccount(id="bot", cookies_path=str(cfg.cookies_path))).unpublish(
+                user["yandex_path"]
+            )
+        except Exception as exc:  # noqa: BLE001 - known limitation (README)
+            errors.append(f"yandex unpublish: {exc}")
 
     registry.revoke(channel)
     bot_users.unbind(tg_id)

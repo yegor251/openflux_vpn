@@ -17,6 +17,7 @@ def build_channel_config(
     port: int,
     yandex_url: str = "",
     mailru_url: str = "",
+    cupsonline: str = "",
     mode: str = "",
     autoupdate: str = "yes",
 ) -> str:
@@ -26,6 +27,8 @@ def build_channel_config(
         lines.append(f"yandex={yandex_url}")
     if mailru_url:
         lines.append(f"mailru={mailru_url}")
+    if cupsonline:
+        lines.append(f"cupsonline={cupsonline}")
     if mode:
         lines.append(f"mode={mode}")
     lines.append(f"key={key}")
