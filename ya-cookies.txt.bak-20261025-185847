@@ -1,0 +1,43 @@
+# Netscape HTTP Cookie File
+# exported by export_yandex_cookies.py
+.passport.yandex.ru	TRUE	/	TRUE	1826574776	lah	2:1855086776.12256032.dvkhamDZmMjB7xB4.oSFLLfDGVExCLh6w0Fo9Oj7Jp7dBELhe5QAleN0ACQnOAPoqw-WVcLt5oUrYQbP1h_fyrBT7X7CkGP716J4gcQTSeDWV5ExpPxC9.TBV8IE3c-nbuFwKbKKR6iQ
+.passport.yandex.ru	TRUE	/	TRUE	1826574776	mda2_beacon	1792014776534
+.passport.yandex.ru	TRUE	/	TRUE	1823972860	mda2_domains	auto.ru,dzen.ru,kinopoisk.ru,shedevrum.ai,ya.ru
+.passport.yandex.ru	TRUE	/	TRUE	1826574776	sessguard	1.1792014776.1788891701656:1fg5Zw:4e78..3.500:2256098.iQbiYygZ.MZq_K2SVMOkFCVphT1CxolHNIb8
+.yandex.ru	TRUE	/	FALSE	1823451701	L	QFBWB3x7WABYZ2lnV19ycgNEWlpYb1l/FAUHSl83PA8SDjcyMAYwWA==.1788891701.2162162.314697.a575ade86e26d84bba39dfcd607b91ac
+.yandex.ru	TRUE	/	TRUE	1826574776	Session_id	3:1792014776.5.0.1788891701656:1fg5Zw:4e78.1.2:1|2136039417.-1.2.3:1788891701|3:12256002.176432.pGqkv3GWNaumcNgG-Trh7Yh9UDk
+.yandex.ru	TRUE	/	TRUE	1826574950	_yasc	JiQIm/fp3yT14GzVwR1NXbUMXk83LYch9TzZhYhweqhtZfwcPOa8YiC2A9n+cVvxFjkz8AwZ731A/ge2PzrKoXqxU3pwOhaZQ60Yyh99KQoMup1+y3vp
+.yandex.ru	TRUE	/	TRUE	1814781405	_ym_d	1783245406
+.yandex.ru	TRUE	/	TRUE	1792086367	_ym_isad	1
+.yandex.ru	TRUE	/	TRUE	1814781405	_ym_uid	1727375621431941813
+.yandex.ru	TRUE	/	TRUE	1807901497	amcuid	478817171776365497
+.yandex.ru	TRUE	/	TRUE	1826575180	bh	EkEiR29vZ2xlIENocm9tZSI7dj0iMTU1IiwgIkNocm9taXVtIjt2PSIxNTUiLCAiTm90KEE6QnJhbmQiO3Y9IjI0IhoDYXJtIg0xNTUuMC44MDU5Ljc5KgI/MDICIiI6ByJtYWNPUyJCBjE1LjcuM0oCNjRSWSJHb29nbGUgQ2hyb21lIjt2PSIxNTUuMC44MDU5Ljc5IiwiQ2hyb21pdW0iO3Y9IjE1NS4wLjgwNTkuNzkiLCJOb3QoQTpCcmFuZCI7dj0iMjQuMC4wLjAiWgI/MGDM9r/WBmoh3MrRtgG78Z+rBPrWhswI0tHt6wP8ua//B9/9h9UF84EC
+.yandex.ru	TRUE	/	TRUE	1823551137	gdpr	0
+.yandex.ru	TRUE	/	TRUE	1826199283	i	sBoo/T4LL21jzcDAItR4n+qkH5zdf7CrsGz4vdRvVDvo1jG4jBL16nMkPBekW+9CbIGxEJble9Pj0S78cAiO9Bdk2vc=
+.yandex.ru	TRUE	/	TRUE	0	isSmartAuthMail	false
+.yandex.ru	TRUE	/	TRUE	1823451713	is_gdpr	0
+.yandex.ru	TRUE	/	TRUE	1823451713	is_gdpr_b	CJyKdhDlmgMoAg==
+.yandex.ru	TRUE	/	TRUE	1792101271	mdd	0
+.yandex.ru	TRUE	/	TRUE	1824226017	my	YwA=
+.yandex.ru	TRUE	/	TRUE	1792101182	orb-global-bar-service-availability-notice-dismissed-until	1792101182993
+.yandex.ru	TRUE	/	TRUE	1826574778	pi	2JInxcnWj9+udx2hDvWtYJ6SmRrMIIBfLlittHT84vEGiquoL+lPav5C7x6OHBkwfkA3z/0XPrQR3fjAhfgbqXUgUxg=
+.yandex.ru	TRUE	/	TRUE	1823551137	receive-cookie-deprecation	1
+.yandex.ru	TRUE	/	TRUE	1826574776	sessar	1.2118107.CiBixJx3FtFzNFpDyK3VAfAIOB5-Jgozy6T-ilBDFzeNLw.gyy4COPmDPm5pqAWSpjX2-XG4dvuCv9TmqlHZK1NnpU
+.yandex.ru	TRUE	/	TRUE	1826574776	sessionid2	3:1792014776.5.0.1788891701656:1fg5Zw:4e78.1.2:1|2136039417.-1.2.3:1788891701|3:12256002.176432.fakesign0000000000000000000
+.yandex.ru	TRUE	/	TRUE	1794606367	yandex_gid	157
+.yandex.ru	TRUE	/	TRUE	1823550776	yandex_login	egorovolegovitch
+.yandex.ru	TRUE	/	TRUE	1804694269	yandexuid	8035601081693661354
+.yandex.ru	TRUE	/	TRUE	1795344937	yashr	9221009281763808937
+.yandex.ru	TRUE	/	TRUE	1801670269	ymex	2085494269.yrts.1770134269
+.yandex.ru	TRUE	/	TRUE	1826574367	yp	2068134147.multib.1#1805434018.szm.2:1352x878:1351x640#2104251701.udn.cDplZ29yb3ZvbGVnb3ZpdGNo#1794606367.ygu.1
+.yandex.ru	TRUE	/	TRUE	1804694269	yuidss	8035601081693661354
+disk.yandex.ru	FALSE	/	TRUE	0	yandex_360_session_exp_cache	0
+docs.yandex.ru	FALSE	/	TRUE	0	yandex_360_session_exp_cache	0
+mail.yandex.ru	FALSE	/	TRUE	1826574813	stngs	stngs.1%3Acolorful%3A%3Atrue%3Atrue
+mc.yandex.ru	FALSE	/	TRUE	0	yabs-sid	1447922641792014367
+oauth.yandex.ru	FALSE	/	TRUE	1826575135	uniqueuid	785372151792015135
+passport.yandex.ru	FALSE	/	TRUE	1823451681	uniqueuid	6d2b39236c3c4b3a992d53c6dfe417da1788891680
+runtime.strm.yandex.ru	FALSE	/player/video	TRUE	1802952635	vpuid	3gicurf2gu
+telemost.yandex.ru	FALSE	/	FALSE	0	_mssngr_flags	theme%3Dauto
+telemost.yandex.ru	FALSE	/	FALSE	0	_mssngr_saved_state	
+volga.yandex.ru	FALSE	/	FALSE	1792878790	uid	CigarmrP+cY5dQAvAwRXAgT=

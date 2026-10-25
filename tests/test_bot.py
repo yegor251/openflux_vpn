@@ -135,3 +135,68 @@ def test_backup_probe_staleness(tmp_path):
 def test_config_dir_env_override(tmp_path, monkeypatch):
     monkeypatch.setenv("OFLUX_BOT_CONFIG_DIR", str(tmp_path))
     assert bot_config_dir() == tmp_path
+
+
+def test_rotate_double_tap_rotates_once(tmp_path, monkeypatch):
+    """Two taps on "Подтверждаю" = one rotation, not one per tap (bug 2026-10-25)."""
+    import asyncio
+    import time
+
+    from aiogram import Dispatcher
+
+    from oflux_bot import handlers
+    from oflux_bot.config import BotUsers
+
+    calls = []
+
+    def slow_rotate(cfg, channel):  # sync, like the real ops (runs via to_thread)
+        calls.append(channel)
+        time.sleep(0.05)
+        return {"link": "openflux://v1/x"}
+
+    monkeypatch.setattr(handlers, "rotate_channel", slow_rotate)
+
+    bot_users = BotUsers(tmp_path / "bot_users.json")
+    bot_users.bind_channel(1134181734, "chan-1")
+
+    dp = Dispatcher()
+    handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users)
+    confirm = next(
+        h.callback for h in dp.callback_query.handlers
+        if getattr(h.callback, "__name__", "") == "rotate_confirm"
+    )
+
+    class FakeMessage:
+        def __init__(self):
+            self.texts = []
+
+        async def edit_reply_markup(self, reply_markup=None):
+            self.markup_dropped = True
+
+        async def edit_text(self, text, **kw):
+            self.texts.append(("edit", text))
+
+        async def answer_photo(self, *a, **kw):
+            self.texts.append(("photo", kw.get("caption")))
+
+    class FakeQuery:
+        def __init__(self):
+            self.data = "rotate:chan-1"
+            self.from_user = type("U", (), {"id": 1134181734})()
+            self.message = FakeMessage()
+            self.answers = []
+
+        async def answer(self, text=None, show_alert=False):
+            self.answers.append(text)
+
+    async def scenario():
+        q1, q2 = FakeQuery(), FakeQuery()
+        await asyncio.gather(confirm(q1), confirm(q2))
+        return q1, q2
+
+    q1, q2 = asyncio.run(scenario())
+
+    assert calls == ["chan-1"]  # exactly one rotation
+    assert q1.message.markup_dropped  # button removed on the first tap
+    assert any(t == ("edit",) or "новый ключ" in t[1] for t in q1.message.texts if t[0] == "edit")
+    assert any("Уже выполняется" in (a or "") for a in q2.answers)  # tap 2 rejected

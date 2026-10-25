@@ -89,6 +89,9 @@ def _link_message(channel: str, link: str, note: str) -> str:
 def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUsers) -> None:
     # issuance is long; a double-tap must not create two channels
     issue_lock = asyncio.Lock()
+    # channel mutations: a second tap on "Подтверждаю" must never re-enter
+    # (each re-entry would rotate the key again and send another QR)
+    ops_lock = asyncio.Lock()
 
     def clean(message: Message, text: str, **kwargs):
         # no interaction may leave buttons on the bottom panel
@@ -103,7 +106,8 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
                 return
             msg = await clean(message, "Создаю: канал на сервере...")
             try:
-                result = issue_channel(cfg, bot_users, tg_id)
+                # doc creation + provisioning block for tens of seconds
+                result = await asyncio.to_thread(issue_channel, cfg, bot_users, tg_id)
             except Exception as exc:  # noqa: BLE001 - user-facing error text
                 await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
                 return
@@ -189,14 +193,23 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
         if bot_users.channel_of(query.from_user.id) != channel:
             await query.answer("Это не твой канал", show_alert=True)
             return
-        await query.answer("Меняю ключ...")
-        try:
-            result = rotate_channel(cfg, channel)
-        except Exception as exc:  # noqa: BLE001
-            await query.message.edit_text(f"Не получилось: {str(exc)[:200]}")
+        if ops_lock.locked():  # no await before acquire: check+take is atomic
+            await query.answer("Уже выполняется, подожди пару секунд", show_alert=True)
             return
-        await query.message.edit_text(_link_message(channel, result["link"], "новый ключ"))
-        await query.message.answer_photo(qr_photo(result["link"]), caption="новый QR")
+        async with ops_lock:
+            await query.answer("Меняю ключ...")
+            await _drop_confirm_buttons(query)
+            try:
+                # ops are blocking subprocess/systemctl calls: keep the loop free
+                result = await asyncio.to_thread(rotate_channel, cfg, channel)
+            except Exception as exc:  # noqa: BLE001
+                await query.message.edit_text(f"Не получилось: {str(exc)[:200]}")
+                return
+            await query.message.edit_text(_link_message(channel, result["link"], "новый ключ"))
+            await query.message.answer_photo(
+                qr_photo(result["link"]), caption="новый QR",
+                reply_markup=ReplyKeyboardRemove(),
+            )
 
     @dp.callback_query(F.data.startswith("revoke:"))
     async def revoke_confirm(query) -> None:
@@ -205,16 +218,28 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
         if bot_users.channel_of(tg_id) != channel:
             await query.answer("Это не твой канал", show_alert=True)
             return
-        await query.answer("Удаляю...")
-        try:
-            errors = revoke_channel(cfg, bot_users, channel, tg_id)
-        except Exception as exc:  # noqa: BLE001
-            await query.message.edit_text(f"Не получилось: {str(exc)[:200]}")
+        if ops_lock.locked():
+            await query.answer("Уже выполняется, подожди пару секунд", show_alert=True)
             return
-        text = f"Канал {channel} удалён."
-        for err in errors:
-            text += f"\nпредупреждение уборки: {err}"
-        await query.message.edit_text(text)
+        async with ops_lock:
+            await query.answer("Удаляю...")
+            await _drop_confirm_buttons(query)
+            try:
+                errors = await asyncio.to_thread(revoke_channel, cfg, bot_users, channel, tg_id)
+            except Exception as exc:  # noqa: BLE001
+                await query.message.edit_text(f"Не получилось: {str(exc)[:200]}")
+                return
+            text = f"Канал {channel} удалён."
+            for err in errors:
+                text += f"\nпредупреждение уборки: {err}"
+            await query.message.edit_text(text)
+
+    async def _drop_confirm_buttons(query) -> None:
+        """Remove inline buttons at once: repeated taps must not re-enter."""
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:  # noqa: BLE001 - message may already be edited
+            pass
 
 
 def _confirm_kb(data: str):
