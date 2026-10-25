@@ -54,12 +54,15 @@ def _cups_rooms_from_journal(ops: LocalOps, channel: str, timeout_s: int = 90) -
 
 
 def _pin_cups_rooms(ops: LocalOps, channel: str, rooms: str, timeout_s: int = 60) -> None:
-    """Pin the room list into the node conf and restart: the same rooms must
-    survive node restarts, otherwise every issued link would die."""
+    """Finalize a cups node conf: pin the room list into it, drop the
+    installer's always-on direct listener (a dual-transport exit throttles
+    a cups-only client to a trickle — TR-10 failover PoC), restart once and
+    wait for the re-join line."""
     ops.run(
         f"sed -i 's|^URL = {CUPS_BOOTSTRAP_URL}|URL = {rooms}|'"
         f" /etc/openflux-node/{channel}/node.conf"
     )
+    ops.run(f"sed -i '/\\[Transport direct\\]/,/Listen = /d' /etc/openflux-node/{channel}/node.conf")
     ops.run(f"systemctl restart openflux-node@{channel}.service")
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -180,6 +183,8 @@ def rotate_channel(cfg: BotConfig, channel: str) -> dict:
     result = prov.apply(channel, conf)
 
     if user.get("cups_url"):
+        # the installer re-adds its direct listener on every apply
+        _pin_cups_rooms(ops, channel, user["cups_url"])
         link = make_link(
             name=channel,
             secret=new_key,
@@ -242,6 +247,16 @@ def doctor_channel(cfg: BotConfig, channel: str) -> list[tuple[str, bool, str]]:
     checks: list[tuple[str, bool, str]] = []
     rc, out = subprocess.getstatusoutput(f"systemctl is-active openflux-node@{channel}")
     checks.append(("unit", out.strip() == "active", out.strip() or "unknown"))
+    if user.get("cups_url"):
+        # carrier channel: no client-facing listener; health = the node is
+        # sitting in its rooms (journal line from the last (re)start)
+        _, out, _ = LocalOps().run(
+            f"journalctl -u openflux-node@{channel}.service -o cat"
+            " | grep -F 'зашли в' | tail -1 || true"
+        )
+        line = out.strip()
+        checks.append(("carrier", bool(line), line or "нет записи о входе в комнаты"))
+        return checks
     port = user["port"]
     import socket
 
