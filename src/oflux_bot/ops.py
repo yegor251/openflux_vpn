@@ -112,9 +112,18 @@ def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: st
     conf = build_channel_config(
         channel=channel, key=key, port=port, cupsonline=rooms, mode="l3"
     )
-    result = prov.apply(channel, conf)
-
-    _finalize_cups_conf(ops, channel, rooms)
+    try:
+        result = prov.apply(channel, conf)
+        _finalize_cups_conf(ops, channel, rooms)
+    except Exception:
+        # the set was never used: put it back at the front of the pool
+        ops.run(
+            "python3 -c "
+            f"'import json,pathlib; p=pathlib.Path(\"{cfg.config_dir}/{POOL_PATH}\"); "
+            f"d=json.loads(p.read_text()); d[\"sets\"].insert(0, \"{rooms}\"); "
+            "p.write_text(json.dumps(d, indent=1))'"
+        )
+        raise
 
     link = make_link(
         name=channel,
