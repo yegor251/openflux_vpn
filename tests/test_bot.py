@@ -135,3 +135,48 @@ def test_backup_probe_staleness(tmp_path):
 def test_config_dir_env_override(tmp_path, monkeypatch):
     monkeypatch.setenv("OFLUX_BOT_CONFIG_DIR", str(tmp_path))
     assert bot_config_dir() == tmp_path
+
+
+def test_register_without_invite_binds_nothing(tmp_path):
+    users = BotUsers(tmp_path / "bot_users.json")
+    users.register(42424242)
+    assert users.is_registered(42424242)
+    assert users.channel_of(42424242) is None
+
+
+def test_password_gate_accepts_and_resets():
+    from oflux_bot.password_gate import LOCKED, OK, PasswordGate
+
+    gate = PasswordGate(max_attempts=3, lockout_s=60)
+    assert gate.check(1, "secret", "secret") == OK
+    assert gate.check(1, "secret", "secret") == OK  # success clears the counter
+
+
+def test_password_gate_counts_attempts_then_locks():
+    from oflux_bot.password_gate import LOCKED, PasswordGate
+
+    gate = PasswordGate(max_attempts=3, lockout_s=60)
+    assert gate.check(7, "bad1", "pw").startswith("wrong:2")
+    assert gate.check(7, "bad2", "pw").startswith("wrong:1")
+    assert gate.check(7, "bad3", "pw").startswith("wrong:0")
+    assert gate.check(7, "pw", "pw") == LOCKED  # right password, but locked out
+    other = gate.check(8, "pw", "pw")
+    assert other == "ok"
+
+
+def test_bot_config_reads_issue_password(tmp_path, monkeypatch):
+    from oflux_bot.config import load_bot_config
+
+    monkeypatch.setenv("OFLUX_BOT_CONFIG_DIR", str(tmp_path))
+    servers = str(tmp_path / "servers.yaml")
+    (tmp_path / "servers.yaml").write_text("vds:\n  host: h\n  port: 22\n")
+    (tmp_path / "bot.yaml").write_text(
+        f"bot_token: t\nalert_tg_id: 1\nservers_yaml: {servers}\nissue_password: hunter2\n"
+    )
+    cfg = load_bot_config(tmp_path / "bot.yaml")
+    assert cfg.issue_password == "hunter2"
+
+    (tmp_path / "bot.yaml").write_text(
+        f"bot_token: t\nalert_tg_id: 1\nservers_yaml: {servers}\n"
+    )
+    assert load_bot_config(tmp_path / "bot.yaml").issue_password == ""

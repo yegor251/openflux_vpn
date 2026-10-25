@@ -16,7 +16,7 @@ from oflux_admin.config import UserRegistry
 
 from .alerts import CHECK_INTERVAL_S, Watchdog
 from .config import BotConfig, BotUsers, load_bot_config
-from .handlers import register_handlers
+from .handlers import register_handlers, set_command_menu
 
 
 def _log() -> logging.Logger:
@@ -50,6 +50,7 @@ async def amain(cfg: BotConfig) -> None:
     dp = Dispatcher()
     bot_users = BotUsers(cfg.state_path)
     register_handlers(dp, bot, cfg, bot_users)
+    set_command_menu(bot)
 
     asyncio.create_task(_watchdog_loop(cfg, bot))
     _log().info("oflux-bot started (alert_tg_id=%s)", cfg.alert_tg_id)

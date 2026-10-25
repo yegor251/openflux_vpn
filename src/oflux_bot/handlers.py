@@ -7,18 +7,35 @@ never land in logs — aiogram's logger is pinned to WARNING in main.
 
 from __future__ import annotations
 
+import asyncio
 import io
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BufferedInputFile, Message
+from aiogram.types import BufferedInputFile, Message, ReplyKeyboardRemove
 
 import qrcode
 
 from .config import BotConfig, BotUsers
 from .ops import doctor_channel, issue_channel, reissue_link, revoke_channel, rotate_channel
+from .password_gate import LOCKED, OK, PasswordGate
 
-HELP_TEXT = """Команды:
+BOT_COMMANDS = [
+    ("issue", "Выпустить мой VPN-канал (ссылка + QR)"),
+    ("my", "Показать мою ссылку и QR заново"),
+    ("status", "Состояние моего канала"),
+    ("rotate", "Новый ключ канала (старая ссылка умрёт)"),
+    ("revoke", "Удалить мой канал"),
+    ("download", "Как поставить приложение"),
+    ("help", "Список команд"),
+]
+
+
+def help_text(cfg: BotConfig) -> str:
+    first = "Первый вход: /issue <пароль> (пароль даёт админ)."
+    if not cfg.issue_password:
+        first = "Первый вход: /start <код-приглашение> (код даёт админ)."
+    return f"""Команды:
 /issue — выпустить свой VPN-канал (ссылка + QR)
 /my — показать мою ссылку и QR
 /rotate — новый ключ для канала (старая ссылка умрёт)
@@ -26,7 +43,7 @@ HELP_TEXT = """Команды:
 /status — состояние моего канала
 /download — как поставить приложение
 
-Первый вход: /start <код-приглашение> (код даёт админ).
+{first}
 """
 
 DOWNLOAD_TEXT = """Как подключиться:
@@ -41,6 +58,26 @@ DOWNLOAD_TEXT = """Как подключиться:
 """
 
 
+def set_command_menu(bot: Bot) -> None:
+    """Telegram command menu (the hints above the keyboard); best-effort."""
+    import logging
+
+    from aiogram.types import BotCommand
+
+    async def run() -> None:
+        try:
+            await bot.set_my_commands(
+                [BotCommand(command=c, description=d) for c, d in BOT_COMMANDS]
+            )
+        except Exception as exc:  # noqa: BLE001 - menu is cosmetic, never fatal
+            logging.getLogger("oflux_bot").warning("set_my_commands failed: %s", exc)
+
+    try:
+        asyncio.get_running_loop().create_task(run())
+    except RuntimeError:  # no loop (tests): skip silently
+        pass
+
+
 def qr_photo(link: str) -> BufferedInputFile:
     buf = io.BytesIO()
     qrcode.make(link).save(buf, format="PNG")
@@ -53,89 +90,136 @@ def _link_message(channel: str, link: str, note: str) -> str:
 
 
 def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUsers) -> None:
-    import asyncio
-
     # issuance is long; a double-tap must not create two channels
     issue_lock = asyncio.Lock()
+    gate = PasswordGate()
+    awaiting_password: set[int] = set()
 
     def registered(message: Message) -> bool:
         return bot_users.is_registered(message.from_user.id)
+
+    def clean(message: Message, text: str, **kwargs):
+        # no interaction may leave buttons on the bottom panel
+        kwargs.setdefault("reply_markup", ReplyKeyboardRemove())
+        return message.answer(text, **kwargs)
+
+    async def try_password_issue(message: Message, candidate: str) -> None:
+        tg_id = message.from_user.id
+        verdict = gate.check(tg_id, candidate, cfg.issue_password)
+        if verdict == LOCKED:
+            await clean(message, "Слишком много неверных попыток. Попроси у админа новый пароль.")
+            return
+        if verdict != OK:
+            left = verdict.split(":", 1)[1]
+            await clean(message, f"Неверный пароль. Осталось попыток: {left}.")
+            return
+        bot_users.register(tg_id)
+        await clean(message, "Пароль принят. Ты зарегистрирован, создаю канал...")
+        await _do_issue(message)
+
+    async def _do_issue(message: Message) -> None:
+        tg_id = message.from_user.id
+        async with issue_lock:
+            if bot_users.channel_of(tg_id):  # re-check under the lock
+                await clean(message, "У тебя уже есть канал: /my. Один канал на пользователя.")
+                return
+            msg = await clean(message, "Создаю: канал на сервере...")
+            try:
+                result = issue_channel(cfg, bot_users, tg_id)
+            except Exception as exc:  # noqa: BLE001 - user-facing error text
+                await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
+                return
+        await msg.edit_text(_link_message(result["channel"], result["link"], "готов"))
+        await message.answer_photo(
+            qr_photo(result["link"]), caption="QR для приложения",
+            reply_markup=ReplyKeyboardRemove(),
+        )
 
     @dp.message(CommandStart(deep_link=True))
     async def start_with_token(message: Message, command: CommandObject) -> None:
         token = (command.args or "").strip()
         if not token:
-            await message.answer(HELP_TEXT)
+            await clean(message, help_text(cfg))
             return
         if bot_users.claim_invite(token, message.from_user.id):
-            await message.answer(
-                "Привет! Ты зарегистрирован.\nТеперь создай свой канал: /issue"
-            )
+            await clean(message, "Привет! Ты зарегистрирован.\nТеперь создай свой канал: /issue")
         else:
-            await message.answer(
-                "Код не найден или уже использован. Попроси у админа новый."
-            )
+            await clean(message, "Код не найден или уже использован. Попроси у админа новый.")
 
     @dp.message(CommandStart())
     async def start(message: Message) -> None:
         if registered(message):
-            await message.answer(HELP_TEXT)
+            await clean(message, help_text(cfg))
+        elif cfg.issue_password:
+            await clean(
+                message,
+                "Это приватный бот. Чтобы получить VPN: /issue <пароль> (пароль даёт админ).\n\n"
+                + DOWNLOAD_TEXT,
+            )
         else:
-            await message.answer(
-                "Это приватный бот. Вход — по коду-приглашению: /start <код>\n" + DOWNLOAD_TEXT
+            await clean(
+                message,
+                "Это приватный бот. Вход — по коду-приглашению: /start <код>\n" + DOWNLOAD_TEXT,
             )
 
     @dp.message(Command("help"))
     async def help_cmd(message: Message) -> None:
-        await message.answer(HELP_TEXT if registered(message) else DOWNLOAD_TEXT)
+        await clean(message, help_text(cfg) if registered(message) else DOWNLOAD_TEXT)
 
     @dp.message(Command("download"))
     async def download(message: Message) -> None:
-        await message.answer(DOWNLOAD_TEXT)
+        await clean(message, DOWNLOAD_TEXT)
 
     @dp.message(Command("issue"))
-    async def issue(message: Message) -> None:
+    async def issue(message: Message, command: CommandObject) -> None:
         if not registered(message):
-            await message.answer("Сначала регистрация: /start <код-приглашение>")
+            if not cfg.issue_password:
+                await clean(message, "Сначала регистрация: /start <код-приглашение>")
+                return
+            candidate = (command.args or "").strip()
+            if candidate:
+                await try_password_issue(message, candidate)
+            else:
+                awaiting_password.add(message.from_user.id)
+                await clean(
+                    message,
+                    "Пришли пароль доступа одним сообщением (или сразу: /issue пароль).",
+                )
             return
+        await _do_issue(message)
+
+    # plain text = a password attempt from a user the bot asked for one
+    @dp.message(F.text & ~F.text.startswith("/"))
+    async def plain_text(message: Message) -> None:
         tg_id = message.from_user.id
-        if bot_users.channel_of(tg_id):
-            await message.answer("У тебя уже есть канал: /my. Один канал на пользователя.")
+        if tg_id not in awaiting_password:
             return
-        async with issue_lock:
-            if bot_users.channel_of(tg_id):  # re-check under the lock
-                await message.answer("У тебя уже есть канал: /my. Один канал на пользователя.")
-                return
-            msg = await message.answer("Создаю: документ-носитель...")
-            try:
-                result = issue_channel(cfg, bot_users, tg_id)
-                await msg.edit_text("Создаю: канал на сервере...")
-            except Exception as exc:  # noqa: BLE001 - user-facing error text
-                await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
-                return
-        await msg.edit_text(_link_message(result["channel"], result["link"], "готов"))
-        await message.answer_photo(qr_photo(result["link"]), caption="QR для приложения")
+        awaiting_password.discard(tg_id)
+        await try_password_issue(message, message.text.strip())
 
     @dp.message(Command("my"))
     async def my(message: Message) -> None:
         channel = bot_users.channel_of(message.from_user.id)
         if not channel:
-            await message.answer("У тебя пока нет канала. Создай: /issue")
+            await clean(message, "У тебя пока нет канала. Создай: /issue")
             return
         try:
             link = reissue_link(cfg, channel)
         except Exception as exc:  # noqa: BLE001
-            await message.answer(f"Канал недоступен: {str(exc)[:150]}")
+            await clean(message, f"Канал недоступен: {str(exc)[:150]}")
             return
-        await message.answer(_link_message(channel, link, "твоя ссылка"))
-        await message.answer_photo(qr_photo(link), caption="QR для приложения")
+        await clean(message, _link_message(channel, link, "твоя ссылка"))
+        await message.answer_photo(
+            qr_photo(link), caption="QR для приложения", reply_markup=ReplyKeyboardRemove()
+        )
 
     @dp.message(Command("rotate"))
     async def rotate(message: Message) -> None:
         channel = bot_users.channel_of(message.from_user.id)
         if not channel:
-            await message.answer("У тебя нет канала. Создай: /issue")
+            await clean(message, "У тебя нет канала. Создай: /issue")
             return
+        # the inline confirm keyboard stays: it is the interaction itself
         await message.answer(
             f"Сменить ключ канала {channel}? Старая ссылка и QR перестанут работать.",
             reply_markup=_confirm_kb(f"rotate:{channel}"),
@@ -145,7 +229,7 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
     async def revoke(message: Message) -> None:
         channel = bot_users.channel_of(message.from_user.id)
         if not channel:
-            await message.answer("У тебя нет канала.")
+            await clean(message, "У тебя нет канала.")
             return
         await message.answer(
             f"Удалить канал {channel} безвозвратно?",
@@ -156,14 +240,14 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
     async def status(message: Message) -> None:
         channel = bot_users.channel_of(message.from_user.id)
         if not channel:
-            await message.answer("У тебя нет канала. Создай: /issue")
+            await clean(message, "У тебя нет канала. Создай: /issue")
             return
         lines = [f"Канал {channel}:"]
         ok = True
         for name, healthy, detail in doctor_channel(cfg, channel):
             ok = ok and healthy
             lines.append(f"  [{'ok' if healthy else 'FAIL'}] {name}: {detail}")
-        await message.answer("\n".join(lines))
+        await clean(message, "\n".join(lines))
 
     # -- confirmation buttons -------------------------------------------------
 
