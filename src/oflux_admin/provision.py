@@ -18,6 +18,7 @@ def build_channel_config(
     yandex_url: str = "",
     mailru_url: str = "",
     cupsonline: str = "",
+    telemost_url: str = "",
     mode: str = "",
     autoupdate: str = "yes",
 ) -> str:
@@ -29,6 +30,8 @@ def build_channel_config(
         lines.append(f"mailru={mailru_url}")
     if cupsonline:
         lines.append(f"cupsonline={cupsonline}")
+    if telemost_url:
+        lines.append(f"telemost={telemost_url}")
     if mode:
         lines.append(f"mode={mode}")
     lines.append(f"key={key}")

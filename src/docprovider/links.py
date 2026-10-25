@@ -62,21 +62,26 @@ def make_link(
     docs: ChannelDocs | None = None,
     direct_dial: str | None = None,
     cups_url: str | None = None,
+    telemost_url: str | None = None,
     binary: str | None = None,
 ) -> str:
     """Compose the user-facing openflux:// link for one channel.
 
     The l3/l4 backend is chosen by the exit node, not the link, so it is
     not part of the payload (share.Config mode is only for phpbox stream).
-    Carrier-product channels pass cups_url and neither docs nor
-    direct_dial: the link then carries the cupsonline carrier only, so
-    no client leg ever touches the VDS address.
+    Carrier-product channels pass cups_url or telemost_url and neither
+    docs nor direct_dial: the link then carries the carrier only, so no
+    client leg ever touches the VDS address.
     """
     binary = find_binary(binary)
     transports: list[dict] = []
     if cups_url:
         transports.append(
             {"type": "cupsonline", "name": "cupsonline", "url": cups_url, "priority": 100}
+        )
+    if telemost_url:
+        transports.append(
+            {"type": "telemost", "name": "telemost", "url": telemost_url, "priority": 100}
         )
     if direct_dial:
         transports.append(

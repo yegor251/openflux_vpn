@@ -59,37 +59,48 @@ def _pop_room_set(cfg: BotConfig) -> str:
     return rooms
 
 
-def _finalize_cups_conf(ops: LocalOps, channel: str, rooms: str, timeout_s: int = 60) -> None:
-    """A cups node is ready when its conf carries only the carrier: drop the
-    installer's always-on direct listener (a dual-transport exit throttles a
-    cups-only client to a trickle — TR-10 failover PoC), restart once and
-    wait for the rooms re-join line."""
+def _finalize_carrier_conf(ops: LocalOps, channel: str, marker: str, timeout_s: int = 60) -> None:
+    """A carrier node is ready when its conf carries only the carrier: drop
+    the installer's always-on direct listener (a dual-transport exit
+    throttles a single-carrier client to a trickle — TR-10 failover PoC),
+    restart once and wait for the carrier's live line in the journal."""
     ops.run(f"sed -i '/\\[Transport direct\\]/,/Listen = /d' /etc/openflux-node/{channel}/node.conf")
     ops.run(f"systemctl restart openflux-node@{channel}.service")
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         _, out, _ = ops.run(
             f"journalctl -u openflux-node@{channel}.service -o cat --since '-40 s'"
-            " | grep -F 'зашли в' | tail -1 || true"
+            f" | grep -F '{marker}' | tail -1 || true"
         )
         if out.strip():
             return
         time.sleep(3)
-    raise RuntimeError("нода не перезашла в комнаты после установки")
+    raise RuntimeError(f"нода не подняла носитель (нет строки «{marker}» в журнале)")
+
+
+CARRIER_MARKERS = {"cups": "зашли в", "telemost": "publisher path"}
 
 
 def _registry(cfg: BotConfig) -> UserRegistry:
     return UserRegistry(cfg.registry_path)
 
 
-def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: str | None = None) -> dict:
+def issue_channel(
+    cfg: BotConfig,
+    bot_users: BotUsers,
+    tg_id: int,
+    name_base: str | None = None,
+    *,
+    telemost_url: str | None = None,
+) -> dict:
     """Full self-service issuance for one TG user. Raises on any step.
 
     Carrier-product channels (admin decision 2026-10-25, memory
-    carrier-only-product): the link and the node carry the cupsonline
-    carrier only — rooms are created anonymously here, no Yandex doc,
-    no cookies, and the client never dials the VDS (the node keeps its
-    direct listener for admin drills alone)."""
+    carrier-only-product): the link and the node carry the carrier only —
+    no Yandex doc, no cookies, and the client never dials the VDS. The
+    default carrier is cupsonline (a room set from the pool);
+    ``telemost_url`` switches the channel to a Telemost conference
+    created by the admin."""
     if bot_users.channel_of(tg_id):
         raise RuntimeError("у пользователя уже есть канал")
     registry = _registry(cfg)
@@ -101,7 +112,8 @@ def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: st
     if registry.active_count(server.name) >= server.max_channels:
         raise RuntimeError("сервер переполнен, попробуйте позже")
 
-    rooms = _pop_room_set(cfg)
+    carrier_kind = "telemost" if telemost_url else "cups"
+    rooms = None if telemost_url else _pop_room_set(cfg)
 
     key = secrets.token_hex(32)
     port = registry.alloc_port(server)
@@ -110,25 +122,28 @@ def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: st
     prov.sync_installer()
     prov.probe()
     conf = build_channel_config(
-        channel=channel, key=key, port=port, cupsonline=rooms, mode="l3"
+        channel=channel, key=key, port=port,
+        cupsonline=rooms or "", telemost_url=telemost_url or "", mode="l3",
     )
     try:
         result = prov.apply(channel, conf)
-        _finalize_cups_conf(ops, channel, rooms)
+        _finalize_carrier_conf(ops, channel, CARRIER_MARKERS[carrier_kind])
     except Exception:
-        # the set was never used: put it back at the front of the pool
-        ops.run(
-            "python3 -c "
-            f"'import json,pathlib; p=pathlib.Path(\"{cfg.config_dir}/{POOL_PATH}\"); "
-            f"d=json.loads(p.read_text()); d[\"sets\"].insert(0, \"{rooms}\"); "
-            "p.write_text(json.dumps(d, indent=1))'"
-        )
+        if rooms:
+            # never used by a live channel: put it back at the front of the pool
+            ops.run(
+                "python3 -c "
+                f"'import json,pathlib; p=pathlib.Path(\"{cfg.config_dir}/{POOL_PATH}\"); "
+                f"d=json.loads(p.read_text()); d[\"sets\"].insert(0, \"{rooms}\"); "
+                "p.write_text(json.dumps(d, indent=1))'"
+            )
         raise
 
     link = make_link(
         name=channel,
         secret=key,
         cups_url=rooms,
+        telemost_url=telemost_url,
         binary=cfg.admin.settings.openflux_bin,
     )
     parse_link(link, binary=cfg.admin.settings.openflux_bin)
@@ -142,6 +157,8 @@ def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: st
         vds=server.name,
         host=server.host,
         cups_url=rooms,
+        telemost_url=telemost_url,
+        carrier=carrier_kind,
         link=link,
         tg_id=tg_id,
         created=_now(),
@@ -176,7 +193,15 @@ def rotate_channel(cfg: BotConfig, channel: str) -> dict:
     prov.sync_installer()
     mode = prov.channel_mode(channel)
     prov.remove(channel)
-    if user.get("cups_url"):
+    if user.get("telemost_url"):
+        conf = build_channel_config(
+            channel=channel,
+            key=new_key,
+            port=user["port"],
+            telemost_url=user["telemost_url"],
+            mode=mode,
+        )
+    elif user.get("cups_url"):
         conf = build_channel_config(
             channel=channel,
             key=new_key,
@@ -194,13 +219,21 @@ def rotate_channel(cfg: BotConfig, channel: str) -> dict:
         )
     result = prov.apply(channel, conf)
 
+    # the installer re-adds its direct listener on every apply
     if user.get("cups_url"):
-        # the installer re-adds its direct listener on every apply
-        _finalize_cups_conf(ops, channel, user["cups_url"])
+        _finalize_carrier_conf(ops, channel, CARRIER_MARKERS["cups"])
         link = make_link(
             name=channel,
             secret=new_key,
             cups_url=user["cups_url"],
+            binary=cfg.admin.settings.openflux_bin,
+        )
+    elif user.get("telemost_url"):
+        _finalize_carrier_conf(ops, channel, CARRIER_MARKERS["telemost"])
+        link = make_link(
+            name=channel,
+            secret=new_key,
+            telemost_url=user["telemost_url"],
             binary=cfg.admin.settings.openflux_bin,
         )
     else:
@@ -259,15 +292,16 @@ def doctor_channel(cfg: BotConfig, channel: str) -> list[tuple[str, bool, str]]:
     checks: list[tuple[str, bool, str]] = []
     rc, out = subprocess.getstatusoutput(f"systemctl is-active openflux-node@{channel}")
     checks.append(("unit", out.strip() == "active", out.strip() or "unknown"))
-    if user.get("cups_url"):
+    if user.get("cups_url") or user.get("telemost_url"):
+        kind = "telemost" if user.get("telemost_url") else "cups"
         # carrier channel: no client-facing listener; health = the node is
-        # sitting in its rooms (journal line from the last (re)start)
+        # sitting in its carrier (journal line from the last (re)start)
         _, out, _ = LocalOps().run(
             f"journalctl -u openflux-node@{channel}.service -o cat"
-            " | grep -F 'зашли в' | tail -1 || true"
+            f" | grep -F '{CARRIER_MARKERS[kind]}' | tail -1 || true"
         )
         line = out.strip()
-        checks.append(("carrier", bool(line), line or "нет записи о входе в комнаты"))
+        checks.append((f"carrier ({kind})", bool(line), line or "нет записи о живом носителе"))
         return checks
     port = user["port"]
     import socket
