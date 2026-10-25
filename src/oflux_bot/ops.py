@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import secrets
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -22,13 +23,54 @@ from docprovider import (
     make_link,
     parse_link,
 )
-from docprovider.cupsrooms import create_rooms, pack_rooms
+from docprovider.cupsrooms import create_rooms, pack_rooms  # noqa: F401 - admin-side utility
 from oflux_admin.channels import channel_for
 from oflux_admin.config import UserRegistry
 from oflux_admin.localops import LocalOps
 from oflux_admin.provision import Provisioner, build_channel_config
 
 from .config import BotConfig, BotUsers, mask_link
+
+# Placeholder room list for the first node start: passes the installer's
+# valid_rooms (9 chars, base64url alphabet) but is not a decodable list, so
+# the exit creates fresh rooms at start and prints them to the journal.
+CUPS_BOOTSTRAP_URL = "bootstrap"
+
+
+def _cups_rooms_from_journal(ops: LocalOps, channel: str, timeout_s: int = 90) -> str:
+    """Poll the unit journal for the packed list the exit prints on its
+    first start without one ('=== COPY THIS TO CLIENT ===')."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        _, out, _ = ops.run(
+            f"journalctl -u openflux-node@{channel}.service -o cat --since '-10 min'"
+            " | grep -A1 'COPY THIS' | tail -1 || true"
+        )
+        packed = out.strip().splitlines()[-1].strip() if out.strip() else ""
+        if packed.startswith("eyJ"):
+            return packed
+        time.sleep(3)
+    raise RuntimeError("нода не напечатала список комнат cups.online вовремя")
+
+
+def _pin_cups_rooms(ops: LocalOps, channel: str, rooms: str, timeout_s: int = 60) -> None:
+    """Pin the room list into the node conf and restart: the same rooms must
+    survive node restarts, otherwise every issued link would die."""
+    ops.run(
+        f"sed -i 's|^URL = {CUPS_BOOTSTRAP_URL}|URL = {rooms}|'"
+        f" /etc/openflux-node/{channel}/node.conf"
+    )
+    ops.run(f"systemctl restart openflux-node@{channel}.service")
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        _, out, _ = ops.run(
+            f"journalctl -u openflux-node@{channel}.service -o cat --since '-40 s'"
+            " | grep -F 'зашли в' | tail -1 || true"
+        )
+        if out.strip():
+            return
+        time.sleep(3)
+    raise RuntimeError("нода не перезашла в комнаты после пина списка")
 
 
 def _registry(cfg: BotConfig) -> UserRegistry:
@@ -54,8 +96,6 @@ def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: st
     if registry.active_count(server.name) >= server.max_channels:
         raise RuntimeError("сервер переполнен, попробуйте позже")
 
-    rooms = pack_rooms(create_rooms())
-
     key = secrets.token_hex(32)
     port = registry.alloc_port(server)
     ops = LocalOps()
@@ -63,9 +103,12 @@ def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: st
     prov.sync_installer()
     prov.probe()
     conf = build_channel_config(
-        channel=channel, key=key, port=port, cupsonline=rooms, mode="l3"
+        channel=channel, key=key, port=port, cupsonline=CUPS_BOOTSTRAP_URL, mode="l3"
     )
     result = prov.apply(channel, conf)
+
+    rooms = _cups_rooms_from_journal(ops, channel)
+    _pin_cups_rooms(ops, channel, rooms)
 
     link = make_link(
         name=channel,
