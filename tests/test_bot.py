@@ -137,6 +137,59 @@ def test_config_dir_env_override(tmp_path, monkeypatch):
     assert bot_config_dir() == tmp_path
 
 
+def test_download_menu_platform_roundtrip():
+    """dl:<platform> shows its guide, back button returns to the menu."""
+    import asyncio
+
+    from aiogram import Dispatcher
+
+    from oflux_bot import handlers
+
+    dp = Dispatcher()
+    handlers.register_handlers(dp, bot=None, cfg=None, bot_users=None)
+
+    def find(name):
+        return next(
+            h.callback for h in dp.callback_query.handlers
+            if getattr(h.callback, "__name__", "") == name
+        )
+
+    class FakeMessage:
+        def __init__(self):
+            self.edits = []
+
+        async def edit_text(self, text, **kw):
+            self.edits.append((text, kw.get("reply_markup")))
+
+    class FakeQuery:
+        def __init__(self, data):
+            self.data = data
+            self.message = FakeMessage()
+            self.answered = 0
+
+        async def answer(self):
+            self.answered += 1
+
+    dl_platform, dl_menu = find("dl_platform"), find("dl_menu")
+
+    async def scenario():
+        q = FakeQuery("dl:mac")
+        await dl_platform(q)
+        back = q.message.edits[-1]
+        q2 = FakeQuery("dl:menu")
+        await dl_menu(q2)
+        menu = q2.message.edits[-1]
+        return q, back, menu
+
+    q, (mac_text, back_kb), (menu_text, menu_kb) = asyncio.run(scenario())
+
+    assert q.answered == 1
+    assert "macos-arm64.dmg" in mac_text
+    assert back_kb is not None  # "← К платформам"
+    assert "TestFlight" not in mac_text
+    assert menu_kb is not None and "платформу" in menu_text
+
+
 def test_rotate_double_tap_rotates_once(tmp_path, monkeypatch):
     """Two taps on "Подтверждаю" = one rotation, not one per tap (bug 2026-10-25)."""
     import asyncio

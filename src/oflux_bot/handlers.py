@@ -38,21 +38,91 @@ HELP_TEXT = """Команды:
 /rotate — новый ключ для канала (старая ссылка умрёт)
 /revoke — удалить мой канал
 /status — состояние моего канала
-/download — как поставить приложение
+/download — как поставить приложение (кнопки по платформам)
 
 Канал выдаётся каждому: просто напиши /issue.
 """
 
-DOWNLOAD_TEXT = """Как подключиться:
-
-🤖 Android: github.com/p1neappleXpress/OpenFluxAndroid/releases
-   (свежий релиз → файл ...arm64-v8a-release.apk; сейчас это версия
-   3.7.0. Разрешить установку из источника, затем /my и отсканировать QR)
-📱 iOS: TestFlight — ссылка выдаётся админом
-   (открыть, установить, затем /my и отсканировать QR)
-💻 macOS: CLI из репо проекта, затем
-   sudo ./bin/openflux --config=конфиг-канала
+DL_INTRO = """Как поставить приложение — выбери платформу.
+После установки нужен твой канал: в боте /issue или /my.
 """
+
+ANDROID_TEXT = """🤖 Android
+
+1. Открой официальные релизы (браузером на телефоне):
+   https://github.com/OpenFluxTeam/OpenFluxAndroid/releases/latest
+2. Скачай файл, оканчивающийся на arm64-v8a-release.apk — он для всех
+   современных телефонов (universal — если не уверен в процессоре).
+3. Открой скачанный файл → «Разрешить установку из этого источника»
+   → Установить (предупреждение о не-Play-источнике — норма).
+4. В этом чате напиши /my → бот пришлёт QR-код.
+5. В приложении: «+» / «Добавить» → «Сканировать QR» → наведи на QR.
+6. Нажми «Подключить». Статус «Подключено» = VPN работает.
+
+Проверка: открой 2ip.ru — должен показывать IP сервера, не твой.
+"""
+
+IOS_TEXT = """📱 iPhone / iPad
+
+1. Установи TestFlight из App Store (официальное приложение Apple).
+2. Открой ссылку приглашения в билд:
+   https://testflight.apple.com/join/BwnAcdus
+   (TestFlight откроется → «Accept» → «Install»).
+3. В этом чате напиши /my → бот пришлёт QR-код.
+4. В приложении: «Добавить» → «Сканировать QR» → наведи на QR.
+5. Нажми «Подключить». Статус «Подключено» = VPN работает.
+
+Проверка: открой 2ip.ru — должен показывать IP сервера, не твой.
+"""
+
+MAC_TEXT = """💻 macOS (проверено на Apple Silicon)
+
+1. Открой официальные релизы:
+   https://github.com/OpenFluxTeam/OpenFluxDesktop/releases/latest
+2. Скачай файл ...macos-arm64.dmg (Mac на M1/M2/M3/M4;
+   для старых Intel-маков — ...macos-x64.dmg).
+3. Открой dmg → перетащи OpenFlux в папку Applications.
+4. В этом чате напиши /my и скопируй ТЕКСТ ссылки openflux://v1/...
+5. В приложении: «Добавить» канал → «Вставить ссылку» → вставь.
+6. Нажми «Подключить».
+
+Проверка: открой 2ip.ru — должен показывать IP сервера, не твой.
+"""
+
+WIN_TEXT = """🪟 Windows
+
+1. Открой официальные релизы:
+   https://github.com/OpenFluxTeam/OpenFluxDesktop/releases/latest
+2. Скачай ...windows-x64-setup.exe (или ...windows-x64.msi).
+3. Установи и запусти OpenFlux.
+4. В этом чате напиши /my и скопируй ТЕКСТ ссылки openflux://v1/...
+5. В приложении: «Добавить» канал → «Вставить ссылку» → вставь.
+6. Нажми «Подключить».
+
+Проверка: открой 2ip.ru — должен показывать IP сервера, не твой.
+"""
+
+LINUX_TEXT = """🐧 Linux (x64)
+
+1. Открой официальные релизы:
+   https://github.com/OpenFluxTeam/OpenFluxDesktop/releases/latest
+2. Debian/Ubuntu: скачай ...linux-x64.deb → sudo dpkg -i <файл>.
+   Другие дистрибутивы: ...linux-x64.tar.gz → распакуй и запусти.
+3. В этом чате напиши /my и скопируй ТЕКСТ ссылки openflux://v1/...
+4. В приложении: «Добавить» канал → «Вставить ссылку» → вставь.
+5. Нажми «Подключить».
+
+Проверка: открой 2ip.ru — должен показывать IP сервера, не твой.
+"""
+
+# (callback id, button label, detailed text)
+DL_PLATFORMS = [
+    ("android", "🤖 Android", ANDROID_TEXT),
+    ("ios", "📱 iPhone / iPad", IOS_TEXT),
+    ("mac", "💻 macOS", MAC_TEXT),
+    ("win", "🪟 Windows", WIN_TEXT),
+    ("linux", "🐧 Linux", LINUX_TEXT),
+]
 
 
 def set_command_menu(bot: Bot) -> None:
@@ -127,7 +197,21 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
 
     @dp.message(Command("download"))
     async def download(message: Message) -> None:
-        await clean(message, DOWNLOAD_TEXT)
+        await message.answer(DL_INTRO, reply_markup=_dl_menu_kb())
+
+    @dp.callback_query(F.data == "dl:menu")
+    async def dl_menu(query) -> None:
+        await query.answer()
+        await query.message.edit_text(DL_INTRO, reply_markup=_dl_menu_kb())
+
+    @dp.callback_query(F.data.startswith("dl:"))
+    async def dl_platform(query) -> None:
+        pid = query.data.split(":", 1)[1]
+        entry = next((p for p in DL_PLATFORMS if p[0] == pid), None)
+        await query.answer()
+        if entry is None:
+            return
+        await query.message.edit_text(entry[2], reply_markup=_dl_back_kb())
 
     @dp.message(Command("issue"))
     async def issue(message: Message) -> None:
@@ -247,4 +331,26 @@ def _confirm_kb(data: str):
 
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="Подтверждаю", callback_data=data)]]
+    )
+
+
+def _dl_menu_kb():
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    labels = {pid: label for pid, label, _ in DL_PLATFORMS}
+    rows = [
+        [InlineKeyboardButton(text=labels["android"], callback_data="dl:android"),
+         InlineKeyboardButton(text=labels["ios"], callback_data="dl:ios")],
+        [InlineKeyboardButton(text=labels["mac"], callback_data="dl:mac")],
+        [InlineKeyboardButton(text=labels["win"], callback_data="dl:win"),
+         InlineKeyboardButton(text=labels["linux"], callback_data="dl:linux")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _dl_back_kb():
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="← К платформам", callback_data="dl:menu")]]
     )
