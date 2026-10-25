@@ -156,6 +156,35 @@ def _link_message(channel: str, link: str, note: str) -> str:
     return f"Канал {channel} — {note}\n\n{link}\n\n(ссылка = ключ: не публикуй, храни как пароль)"
 
 
+START_TEXT = "Привет! Выбирай действие — или набирай команду текстом:"
+
+
+def _start_kb():
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    def b(label, cmd):
+        return InlineKeyboardButton(text=label, callback_data=f"cmd:{cmd}")
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [b("🚀 Выпустить канал", "issue"), b("🔗 Моя ссылка", "my")],
+        [b("📊 Статус", "status"), b("🔄 Новый ключ", "rotate")],
+        [b("🗑 Удалить канал", "revoke"), b("⬇️ Как поставить", "download")],
+        [b("❓ Помощь", "help")],
+    ])
+
+
+class _MsgAsUser:
+    """The bot's menu message re-addressed to the user who pressed it:
+    handlers read from_user.id and answer via .answer into the same chat."""
+
+    def __init__(self, message: Message, user_id: int) -> None:
+        self.from_user = type("U", (), {"id": user_id})()
+        self._message = message
+
+    def __getattr__(self, name):
+        return getattr(self._message, name)
+
+
 def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUsers) -> None:
     # issuance is long; a double-tap must not create two channels
     issue_lock = asyncio.Lock()
@@ -191,7 +220,7 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
 
     @dp.message(CommandStart())
     async def start(message: Message) -> None:
-        await clean(message, "Привет! " + HELP_TEXT)
+        await clean(message, START_TEXT, reply_markup=_start_kb())
 
     @dp.message(Command("help"))
     async def help_cmd(message: Message) -> None:
@@ -326,6 +355,26 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
             await query.message.edit_reply_markup(reply_markup=None)
         except Exception:  # noqa: BLE001 - message may already be edited
             pass
+
+    # -- /start menu: buttons run the same code as the typed commands --------
+
+    @dp.callback_query(F.data.startswith("cmd:"))
+    async def cmd_via_button(query) -> None:
+        name = query.data.split(":", 1)[1]
+        routes = {
+            "issue": lambda m: _do_issue(m),
+            "my": lambda m: my(m),
+            "status": lambda m: status(m),
+            "rotate": lambda m: rotate(m),
+            "revoke": lambda m: revoke(m),
+            "download": lambda m: download(m),
+            "help": lambda m: help_cmd(m),
+        }
+        route = routes.get(name)
+        await query.answer()
+        if route is None:
+            return
+        await route(_MsgAsUser(query.message, query.from_user.id))
 
 
 def _confirm_kb(data: str):

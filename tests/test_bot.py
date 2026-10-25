@@ -239,6 +239,64 @@ def test_download_menu_platform_roundtrip():
     assert menu_kb is not None and "платформу" in menu_text
 
 
+def test_start_menu_buttons_route_to_commands(tmp_path, monkeypatch):
+    """/start menu buttons run the same code as typed commands."""
+    import asyncio
+
+    from aiogram import Dispatcher
+
+    from oflux_bot import handlers
+    from oflux_bot.config import BotUsers
+
+    monkeypatch.setattr(handlers, "reissue_link", lambda cfg, ch: "openflux://v1/x")
+    bot_users = BotUsers(tmp_path / "bot_users.json")
+    bot_users.bind_channel(42, "chan-9")
+
+    dp = Dispatcher()
+    handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users)
+    router = next(
+        h.callback for h in dp.callback_query.handlers
+        if getattr(h.callback, "__name__", "") == "cmd_via_button"
+    )
+
+    class FakeMessage:
+        def __init__(self):
+            self.answers = []
+
+        async def answer(self, text=None, **kw):
+            self.answers.append(text)
+            return None
+
+        async def answer_photo(self, *a, **kw):
+            return None
+
+    class FakeQuery:
+        def __init__(self, data, user_id):
+            self.data = data
+            self.from_user = type("U", (), {"id": user_id})()
+            self.message = FakeMessage()
+            self.answered = 0
+
+        async def answer(self):
+            self.answered += 1
+
+    async def scenario():
+        q_my = FakeQuery("cmd:my", 42)
+        await router(q_my)
+        q_status = FakeQuery("cmd:status", 43)  # user without a channel
+        await router(q_status)
+        q_bogus = FakeQuery("cmd:nope", 42)
+        await router(q_bogus)
+        return q_my, q_status, q_bogus
+
+    q_my, q_status, q_bogus = asyncio.run(scenario())
+
+    assert q_my.answered == 1
+    assert any("Канал chan-9" in t for t in q_my.message.answers if t)
+    assert any("нет канала" in t for t in q_status.message.answers if t)
+    assert q_bogus.message.answers == []  # unknown route: silent
+
+
 def test_rotate_double_tap_rotates_once(tmp_path, monkeypatch):
     """Two taps on "Подтверждаю" = one rotation, not one per tap (bug 2026-10-25)."""
     import asyncio
