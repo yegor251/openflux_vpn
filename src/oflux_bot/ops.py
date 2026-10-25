@@ -7,6 +7,7 @@ files and the channel registry live in the bot's config dir.
 
 from __future__ import annotations
 
+import json
 import secrets
 import sys
 import time
@@ -31,37 +32,38 @@ from oflux_admin.provision import Provisioner, build_channel_config
 
 from .config import BotConfig, BotUsers, mask_link
 
-# Placeholder room list for the first node start: passes the installer's
-# valid_rooms (9 chars, base64url alphabet) but is not a decodable list, so
-# the exit creates fresh rooms at start and prints them to the journal.
-CUPS_BOOTSTRAP_URL = "bootstrap"
+# cups.online walls ROOM CREATION from datacenter IPs after a volume
+# (2026-10-25: 403 after ~40 rooms/day from the VDS; joining existing
+# rooms keeps working). Rooms are therefore created on the admin machine
+# (scripts/refill_cups_pool.py) into a pool; /issue pops one set.
+POOL_PATH = "cups-pool.json"
+ROOMS_PER_SET = 8
 
 
-def _cups_rooms_from_journal(ops: LocalOps, channel: str, timeout_s: int = 90) -> str:
-    """Poll the unit journal for the packed list the exit prints on its
-    first start without one ('=== COPY THIS TO CLIENT ===')."""
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        _, out, _ = ops.run(
-            f"journalctl -u openflux-node@{channel}.service -o cat --since '-10 min'"
-            " | grep -A1 'COPY THIS' | tail -1 || true"
+def _pop_room_set(cfg: BotConfig) -> str:
+    """Take one packed room set from the pool (oldest first)."""
+    path = cfg.config_dir / POOL_PATH
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {"sets": []}
+    sets = [s for s in data.get("sets", []) if s]
+    if not sets:
+        raise RuntimeError(
+            "пул комнат cups.online пуст — запусти scripts/refill_cups_pool.py на машине админа"
         )
-        packed = out.strip().splitlines()[-1].strip() if out.strip() else ""
-        if packed.startswith("eyJ"):
-            return packed
-        time.sleep(3)
-    raise RuntimeError("нода не напечатала список комнат cups.online вовремя")
+    rooms, sets = sets[0], sets[1:]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"sets": sets}, indent=1), encoding="utf-8")
+    path.chmod(0o600)
+    return rooms
 
 
-def _pin_cups_rooms(ops: LocalOps, channel: str, rooms: str, timeout_s: int = 60) -> None:
-    """Finalize a cups node conf: pin the room list into it, drop the
-    installer's always-on direct listener (a dual-transport exit throttles
-    a cups-only client to a trickle — TR-10 failover PoC), restart once and
-    wait for the re-join line."""
-    ops.run(
-        f"sed -i 's|^URL = {CUPS_BOOTSTRAP_URL}|URL = {rooms}|'"
-        f" /etc/openflux-node/{channel}/node.conf"
-    )
+def _finalize_cups_conf(ops: LocalOps, channel: str, rooms: str, timeout_s: int = 60) -> None:
+    """A cups node is ready when its conf carries only the carrier: drop the
+    installer's always-on direct listener (a dual-transport exit throttles a
+    cups-only client to a trickle — TR-10 failover PoC), restart once and
+    wait for the rooms re-join line."""
     ops.run(f"sed -i '/\\[Transport direct\\]/,/Listen = /d' /etc/openflux-node/{channel}/node.conf")
     ops.run(f"systemctl restart openflux-node@{channel}.service")
     deadline = time.monotonic() + timeout_s
@@ -73,7 +75,7 @@ def _pin_cups_rooms(ops: LocalOps, channel: str, rooms: str, timeout_s: int = 60
         if out.strip():
             return
         time.sleep(3)
-    raise RuntimeError("нода не перезашла в комнаты после пина списка")
+    raise RuntimeError("нода не перезашла в комнаты после установки")
 
 
 def _registry(cfg: BotConfig) -> UserRegistry:
@@ -99,6 +101,8 @@ def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: st
     if registry.active_count(server.name) >= server.max_channels:
         raise RuntimeError("сервер переполнен, попробуйте позже")
 
+    rooms = _pop_room_set(cfg)
+
     key = secrets.token_hex(32)
     port = registry.alloc_port(server)
     ops = LocalOps()
@@ -106,12 +110,11 @@ def issue_channel(cfg: BotConfig, bot_users: BotUsers, tg_id: int, name_base: st
     prov.sync_installer()
     prov.probe()
     conf = build_channel_config(
-        channel=channel, key=key, port=port, cupsonline=CUPS_BOOTSTRAP_URL, mode="l3"
+        channel=channel, key=key, port=port, cupsonline=rooms, mode="l3"
     )
     result = prov.apply(channel, conf)
 
-    rooms = _cups_rooms_from_journal(ops, channel)
-    _pin_cups_rooms(ops, channel, rooms)
+    _finalize_cups_conf(ops, channel, rooms)
 
     link = make_link(
         name=channel,
@@ -184,7 +187,7 @@ def rotate_channel(cfg: BotConfig, channel: str) -> dict:
 
     if user.get("cups_url"):
         # the installer re-adds its direct listener on every apply
-        _pin_cups_rooms(ops, channel, user["cups_url"])
+        _finalize_cups_conf(ops, channel, user["cups_url"])
         link = make_link(
             name=channel,
             secret=new_key,
