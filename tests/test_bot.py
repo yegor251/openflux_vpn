@@ -239,6 +239,24 @@ def test_download_menu_platform_roundtrip():
     assert menu_kb is not None and "платформу" in menu_text
 
 
+def test_menu_keyboard_is_contextual():
+    """Buttons that cannot work in the current state are not shown; the
+    full non-contextual list stays available as the fallback variant."""
+    from oflux_bot.handlers import _menu_kb
+
+    def callbacks(kb):
+        return [btn.callback_data for row in kb.inline_keyboard for btn in row]
+
+    fresh, owned, full = callbacks(_menu_kb(False)), callbacks(_menu_kb(True)), callbacks(_menu_kb(None))
+
+    assert "cmd:issue" in fresh and "cmd:my" not in fresh
+    assert "cmd:revoke" not in fresh
+    assert "cmd:my" in owned and "cmd:issue" not in owned
+    assert "cmd:revoke" in owned
+    for cmd in ("cmd:issue", "cmd:my", "cmd:status", "cmd:rotate", "cmd:revoke", "cmd:download", "cmd:help"):
+        assert cmd in full
+
+
 def test_start_menu_buttons_route_to_commands(tmp_path, monkeypatch):
     """/start menu buttons run the same code as typed commands."""
     import asyncio

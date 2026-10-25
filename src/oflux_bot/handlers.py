@@ -23,6 +23,7 @@ from .config import BotConfig, BotUsers
 from .ops import doctor_channel, issue_channel, reissue_link, revoke_channel, rotate_channel
 
 BOT_COMMANDS = [
+    ("start", "Меню с кнопками"),
     ("issue", "Выпустить мой VPN-канал (ссылка + QR)"),
     ("my", "Показать мою ссылку и QR заново"),
     ("status", "Состояние моего канала"),
@@ -33,6 +34,7 @@ BOT_COMMANDS = [
 ]
 
 HELP_TEXT = """Команды:
+/start — меню кнопками
 /issue — выпустить свой VPN-канал (ссылка + QR)
 /my — показать мою ссылку и QR
 /rotate — новый ключ для канала (старая ссылка умрёт)
@@ -159,18 +161,37 @@ def _link_message(channel: str, link: str, note: str) -> str:
 START_TEXT = "Привет! Выбирай действие — или набирай команду текстом:"
 
 
-def _start_kb():
+def _menu_kb(has_channel: bool | None = None):
+    """Action buttons for /start and error replies.
+
+    has_channel=True/False shows only the actions that can work right now;
+    None is the full non-contextual list (both variants kept: UI states
+    may drift from the registry, the full menu is the safe fallback).
+    """
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
     def b(label, cmd):
         return InlineKeyboardButton(text=label, callback_data=f"cmd:{cmd}")
 
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [b("🚀 Выпустить канал", "issue"), b("🔗 Моя ссылка", "my")],
-        [b("📊 Статус", "status"), b("🔄 Новый ключ", "rotate")],
-        [b("🗑 Удалить канал", "revoke"), b("⬇️ Как поставить", "download")],
-        [b("❓ Помощь", "help")],
-    ])
+    if has_channel is None:
+        rows = [
+            [b("🚀 Выпустить канал", "issue"), b("🔗 Моя ссылка", "my")],
+            [b("📊 Статус", "status"), b("🔄 Новый ключ", "rotate")],
+            [b("🗑 Удалить канал", "revoke"), b("⬇️ Как поставить", "download")],
+            [b("❓ Помощь", "help")],
+        ]
+    elif has_channel:
+        rows = [
+            [b("🔗 Моя ссылка", "my"), b("📊 Статус", "status")],
+            [b("🔄 Новый ключ", "rotate"), b("🗑 Удалить канал", "revoke")],
+            [b("⬇️ Как поставить", "download"), b("❓ Помощь", "help")],
+        ]
+    else:
+        rows = [
+            [b("🚀 Выпустить канал", "issue"), b("⬇️ Как поставить", "download")],
+            [b("❓ Помощь", "help")],
+        ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 class _MsgAsUser:
@@ -201,7 +222,11 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
         tg_id = message.from_user.id
         async with issue_lock:
             if bot_users.channel_of(tg_id):  # re-check under the lock
-                await clean(message, "У тебя уже есть канал: /my. Один канал на пользователя.")
+                await clean(
+                    message,
+                    "У тебя уже есть канал. Один канал на пользователя.",
+                    reply_markup=_menu_kb(True),
+                )
                 return
             # plain message on purpose: a message sent with ReplyKeyboardRemove
             # can never be edited by the bot (Telegram rejects editMessageText)
@@ -211,6 +236,7 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
                 result = await asyncio.to_thread(issue_channel, cfg, bot_users, tg_id)
             except Exception as exc:  # noqa: BLE001 - user-facing error text
                 await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
+                await clean(message, "Что дальше?", reply_markup=_menu_kb(False))
                 return
         await msg.edit_text(_link_message(result["channel"], result["link"], "готов"))
         await message.answer_photo(
@@ -220,7 +246,10 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
 
     @dp.message(CommandStart())
     async def start(message: Message) -> None:
-        await clean(message, START_TEXT, reply_markup=_start_kb())
+        await clean(
+            message, START_TEXT,
+            reply_markup=_menu_kb(bot_users.channel_of(message.from_user.id)),
+        )
 
     @dp.message(Command("help"))
     async def help_cmd(message: Message) -> None:
@@ -252,12 +281,12 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
     async def my(message: Message) -> None:
         channel = bot_users.channel_of(message.from_user.id)
         if not channel:
-            await clean(message, "У тебя пока нет канала. Создай: /issue")
+            await clean(message, "У тебя пока нет канала. Создай: /issue", reply_markup=_menu_kb(False))
             return
         try:
             link = reissue_link(cfg, channel)
         except Exception as exc:  # noqa: BLE001
-            await clean(message, f"Канал недоступен: {str(exc)[:150]}")
+            await clean(message, f"Канал недоступен: {str(exc)[:150]}", reply_markup=_menu_kb(True))
             return
         await clean(message, _link_message(channel, link, "твоя ссылка"))
         await message.answer_photo(
@@ -268,7 +297,7 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
     async def rotate(message: Message) -> None:
         channel = bot_users.channel_of(message.from_user.id)
         if not channel:
-            await clean(message, "У тебя нет канала. Создай: /issue")
+            await clean(message, "У тебя нет канала. Создай: /issue", reply_markup=_menu_kb(False))
             return
         # the inline confirm keyboard stays: it is the interaction itself
         await message.answer(
@@ -280,7 +309,7 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
     async def revoke(message: Message) -> None:
         channel = bot_users.channel_of(message.from_user.id)
         if not channel:
-            await clean(message, "У тебя нет канала.")
+            await clean(message, "У тебя нет канала.", reply_markup=_menu_kb(False))
             return
         await message.answer(
             f"Удалить канал {channel} безвозвратно?",
@@ -291,7 +320,7 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
     async def status(message: Message) -> None:
         channel = bot_users.channel_of(message.from_user.id)
         if not channel:
-            await clean(message, "У тебя нет канала. Создай: /issue")
+            await clean(message, "У тебя нет канала. Создай: /issue", reply_markup=_menu_kb(False))
             return
         lines = [f"Канал {channel}:"]
         ok = True
