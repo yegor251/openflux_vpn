@@ -137,6 +137,55 @@ def test_config_dir_env_override(tmp_path, monkeypatch):
     assert bot_config_dir() == tmp_path
 
 
+def test_issue_progress_message_sent_plain_and_editable(tmp_path, monkeypatch):
+    """A message sent with ReplyKeyboardRemove can never be edited (Telegram
+    rejects editMessageText) - so the issuance progress message goes plain."""
+    import asyncio
+
+    from aiogram import Dispatcher
+
+    from oflux_bot import handlers
+    from oflux_bot.config import BotUsers
+
+    monkeypatch.setattr(
+        handlers, "issue_channel",
+        lambda cfg, bu, tg: {"channel": "chan-x", "link": "openflux://v1/x"},
+    )
+    bot_users = BotUsers(tmp_path / "bot_users.json")
+
+    dp = Dispatcher()
+    handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users)
+    issue = next(
+        h.callback for h in dp.message.handlers
+        if getattr(h.callback, "__name__", "") == "issue"
+    )
+
+    class FakeSent:
+        async def edit_text(self, text, **kw):
+            self.edited = text
+
+    class FakeMessage:
+        def __init__(self):
+            self.from_user = type("U", (), {"id": 555})()
+            self.answers = []
+
+        async def answer(self, text=None, **kw):
+            sent = FakeSent()
+            sent.text = text
+            self.answers.append((sent, kw))
+            return sent
+
+        async def answer_photo(self, *a, **kw):
+            self.answers.append((FakeSent(), {"photo": True}))
+
+    msg = FakeMessage()
+    asyncio.run(issue(msg))
+
+    progress_sent, progress_kw = msg.answers[0]
+    assert "reply_markup" not in progress_kw  # plain, so edit_text works
+    assert progress_sent.edited.startswith("Канал chan-x")
+
+
 def test_download_menu_platform_roundtrip():
     """dl:<platform> shows its guide, back button returns to the menu."""
     import asyncio

@@ -174,7 +174,9 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
             if bot_users.channel_of(tg_id):  # re-check under the lock
                 await clean(message, "У тебя уже есть канал: /my. Один канал на пользователя.")
                 return
-            msg = await clean(message, "Создаю: канал на сервере...")
+            # plain message on purpose: a message sent with ReplyKeyboardRemove
+            # can never be edited by the bot (Telegram rejects editMessageText)
+            msg = await message.answer("Создаю: канал на сервере...")
             try:
                 # doc creation + provisioning block for tens of seconds
                 result = await asyncio.to_thread(issue_channel, cfg, bot_users, tg_id)
