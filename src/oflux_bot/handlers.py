@@ -134,12 +134,17 @@ def set_command_menu(bot: Bot) -> None:
     from aiogram.types import BotCommand
 
     async def run() -> None:
-        try:
-            await bot.set_my_commands(
-                [BotCommand(command=c, description=d) for c, d in BOT_COMMANDS]
-            )
-        except Exception as exc:  # noqa: BLE001 - menu is cosmetic, never fatal
-            logging.getLogger("oflux_bot").warning("set_my_commands failed: %s", exc)
+        for attempt in (1, 2):  # a network blip here leaves a stale menu
+            try:
+                await bot.set_my_commands(
+                    [BotCommand(command=c, description=d) for c, d in BOT_COMMANDS]
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 - menu is cosmetic, never fatal
+                logging.getLogger("oflux_bot").warning(
+                    "set_my_commands failed (try %d): %s", attempt, exc
+                )
+                await asyncio.sleep(5)
 
     try:
         asyncio.get_running_loop().create_task(run())
