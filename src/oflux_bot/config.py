@@ -25,7 +25,6 @@ class BotConfig:
     alert_tg_id: int
     max_channels_per_user: int
     admin: AdminConfig  # servers.yaml of the bot host (single server)
-    issue_password: str = ""  # empty = password self-issue is off (invites only)
 
     @property
     def config_dir(self) -> Path:
@@ -59,7 +58,6 @@ def load_bot_config(path: str | Path | None = None) -> BotConfig:
         alert_tg_id=alert_tg_id,
         max_channels_per_user=int(raw.get("max_channels_per_user", 1)),
         admin=admin,
-        issue_password=str(raw.get("issue_password", "")),
     )
 
 
@@ -131,12 +129,6 @@ class BotUsers:
     def is_registered(self, tg_id: int) -> bool:
         self._reload()
         return str(tg_id) in self._data["users"]
-
-    def register(self, tg_id: int) -> None:
-        """Register without an invite (password self-issue path)."""
-        self._reload()
-        self._data["users"].setdefault(str(tg_id), {"channel": None, "invite": None})
-        self.save()
 
     # -- bindings ------------------------------------------------------------
 

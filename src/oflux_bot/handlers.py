@@ -1,8 +1,11 @@
 """Telegram handlers: user self-service for channels + admin alerts.
 
 One bot for everyone; a TG user only ever touches their own channel.
-Links/QR leave the bot as chat messages (that is their purpose) but
-never land in logs — aiogram's logger is pinned to WARNING in main.
+Open self-issue by design (admin's call 2026-10-25): anyone who finds
+the bot writes /issue and gets a channel; the guard is one channel per
+TG-ID and the server's max_channels. Links/QR leave the bot as chat
+messages (that is their purpose) but never land in logs — aiogram's
+logger is pinned to WARNING in main.
 """
 
 from __future__ import annotations
@@ -11,14 +14,13 @@ import asyncio
 import io
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, Message, ReplyKeyboardRemove
 
 import qrcode
 
 from .config import BotConfig, BotUsers
 from .ops import doctor_channel, issue_channel, reissue_link, revoke_channel, rotate_channel
-from .password_gate import LOCKED, OK, PasswordGate
 
 BOT_COMMANDS = [
     ("issue", "Выпустить мой VPN-канал (ссылка + QR)"),
@@ -30,12 +32,7 @@ BOT_COMMANDS = [
     ("help", "Список команд"),
 ]
 
-
-def help_text(cfg: BotConfig) -> str:
-    first = "Первый вход: /issue <пароль> (пароль даёт админ)."
-    if not cfg.issue_password:
-        first = "Первый вход: /start <код-приглашение> (код даёт админ)."
-    return f"""Команды:
+HELP_TEXT = """Команды:
 /issue — выпустить свой VPN-канал (ссылка + QR)
 /my — показать мою ссылку и QR
 /rotate — новый ключ для канала (старая ссылка умрёт)
@@ -43,7 +40,7 @@ def help_text(cfg: BotConfig) -> str:
 /status — состояние моего канала
 /download — как поставить приложение
 
-{first}
+Канал выдаётся каждому: просто напиши /issue.
 """
 
 DOWNLOAD_TEXT = """Как подключиться:
@@ -92,30 +89,11 @@ def _link_message(channel: str, link: str, note: str) -> str:
 def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUsers) -> None:
     # issuance is long; a double-tap must not create two channels
     issue_lock = asyncio.Lock()
-    gate = PasswordGate()
-    awaiting_password: set[int] = set()
-
-    def registered(message: Message) -> bool:
-        return bot_users.is_registered(message.from_user.id)
 
     def clean(message: Message, text: str, **kwargs):
         # no interaction may leave buttons on the bottom panel
         kwargs.setdefault("reply_markup", ReplyKeyboardRemove())
         return message.answer(text, **kwargs)
-
-    async def try_password_issue(message: Message, candidate: str) -> None:
-        tg_id = message.from_user.id
-        verdict = gate.check(tg_id, candidate, cfg.issue_password)
-        if verdict == LOCKED:
-            await clean(message, "Слишком много неверных попыток. Попроси у админа новый пароль.")
-            return
-        if verdict != OK:
-            left = verdict.split(":", 1)[1]
-            await clean(message, f"Неверный пароль. Осталось попыток: {left}.")
-            return
-        bot_users.register(tg_id)
-        await clean(message, "Пароль принят. Ты зарегистрирован, создаю канал...")
-        await _do_issue(message)
 
     async def _do_issue(message: Message) -> None:
         tg_id = message.from_user.id
@@ -135,67 +113,21 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
             reply_markup=ReplyKeyboardRemove(),
         )
 
-    @dp.message(CommandStart(deep_link=True))
-    async def start_with_token(message: Message, command: CommandObject) -> None:
-        token = (command.args or "").strip()
-        if not token:
-            await clean(message, help_text(cfg))
-            return
-        if bot_users.claim_invite(token, message.from_user.id):
-            await clean(message, "Привет! Ты зарегистрирован.\nТеперь создай свой канал: /issue")
-        else:
-            await clean(message, "Код не найден или уже использован. Попроси у админа новый.")
-
     @dp.message(CommandStart())
     async def start(message: Message) -> None:
-        if registered(message):
-            await clean(message, help_text(cfg))
-        elif cfg.issue_password:
-            await clean(
-                message,
-                "Это приватный бот. Чтобы получить VPN: /issue <пароль> (пароль даёт админ).\n\n"
-                + DOWNLOAD_TEXT,
-            )
-        else:
-            await clean(
-                message,
-                "Это приватный бот. Вход — по коду-приглашению: /start <код>\n" + DOWNLOAD_TEXT,
-            )
+        await clean(message, "Привет! " + HELP_TEXT)
 
     @dp.message(Command("help"))
     async def help_cmd(message: Message) -> None:
-        await clean(message, help_text(cfg) if registered(message) else DOWNLOAD_TEXT)
+        await clean(message, HELP_TEXT)
 
     @dp.message(Command("download"))
     async def download(message: Message) -> None:
         await clean(message, DOWNLOAD_TEXT)
 
     @dp.message(Command("issue"))
-    async def issue(message: Message, command: CommandObject) -> None:
-        if not registered(message):
-            if not cfg.issue_password:
-                await clean(message, "Сначала регистрация: /start <код-приглашение>")
-                return
-            candidate = (command.args or "").strip()
-            if candidate:
-                await try_password_issue(message, candidate)
-            else:
-                awaiting_password.add(message.from_user.id)
-                await clean(
-                    message,
-                    "Пришли пароль доступа одним сообщением (или сразу: /issue пароль).",
-                )
-            return
+    async def issue(message: Message) -> None:
         await _do_issue(message)
-
-    # plain text = a password attempt from a user the bot asked for one
-    @dp.message(F.text & ~F.text.startswith("/"))
-    async def plain_text(message: Message) -> None:
-        tg_id = message.from_user.id
-        if tg_id not in awaiting_password:
-            return
-        awaiting_password.discard(tg_id)
-        await try_password_issue(message, message.text.strip())
 
     @dp.message(Command("my"))
     async def my(message: Message) -> None:
