@@ -4,25 +4,28 @@
 |---|---|
 | Область | продукт / дистрибуция |
 | Приоритет | P1 |
-| Статус | open (~30 минут работы) |
-| Зависимости | CL-01 (Android-приёмка до смены версии в `/download`) |
-| Апстрим | `OpenFluxTeam/OpenFluxAndroid` v3.10.3, `OpenFluxTeam/OpenFluxDesktop` v3.10.3, iOS TestFlight |
+| Статус | реализовано 2026-10-25 иначе, чем планировалось: кнопки платформ + ссылки на
+`releases/latest` вместо пина версии — team-репы релизятся ежедневно
+(Android v3.13.0 вышла за день до Desktop v3.12.2), пин протухал бы
+за сутки. Тексты — `src/oflux_bot/handlers.py` (DL_PLATFORMS). |
+| Зависимости | CL-01 (приёмка Android), CL-05 (desktop-приёмка — v3.12.2 на Mac
+поставлен и запущен 2026-10-25, туннель не прогонялся) |
+| Апстрим | `OpenFluxTeam/OpenFluxAndroid`, `OpenFluxTeam/OpenFluxDesktop`, iOS TestFlight |
 
 ## Проблема
 
-`/download` указывает на замороженные репы p1neappleXpress (v3.7.0) и
+`/download` указывал на замороженные репы p1neappleXpress (v3.7.0) и
 заглушку iOS. Живые сборки — в организации OpenFluxTeam, iOS —
-TestFlight. Huawei/без-GitHub юзеры не могут скачать APK с GitHub.
+TestFlight.
 
-## Ожидаемый результат
+## Что сделано (2026-10-25)
 
-- [ ] `/download` (текст в `src/oflux_bot/handlers.py`, DOWNLOAD_TEXT):
-      Android — релиз **v3.10.3** из `OpenFluxTeam/OpenFluxAndroid`
-      (arm64-v8a APK); iOS — TestFlight
-      `https://testflight.apple.com/join/BwnAcdus` (сборщик @saharev1);
-      Desktop — `OpenFluxTeam/OpenFluxDesktop` v3.10.3 (dmg/msi/deb);
-- [ ] APK зафиксирован (версия + SHA-256), зеркало на нашем VPS как
-      запасной путь (Issues #34/#38: GitHub качается не у всех);
-- [ ] правило: версия в `/download` меняется только после приёмки
-      (CL-01, 15-минутный регресс);
-- [ ] проверено на реальном устройстве: ссылка из бота → рабочий туннель.
+- [x] `/download` — сообщение с кнопками платформ (Android, iPhone/iPad,
+      macOS, Windows, Linux), у каждой пошаговая инструкция: официальная
+      страница релизов, точное имя файла (arm64-v8a APK / macos-arm64.dmg /
+      setup.exe / deb), установка, получение канала (/my → QR на телефоне,
+      текст ссылки на десктопе), подключение, проверка через 2ip.ru;
+- [ ] зеркало APK на нашем VPS (Issues #34/#38: GitHub качается не у
+      всех) — НЕ сделано, решить при росте числа юзеров;
+- [ ] приёмки версий: CL-01 (Android), CL-05 (desktop-туннель) —
+      решают, стоит ли что-то менять в текстах.
