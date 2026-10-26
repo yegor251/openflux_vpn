@@ -192,7 +192,12 @@ def rotate_channel(cfg: BotConfig, channel: str) -> dict:
     prov = Provisioner(ops, cfg.admin.settings.installer)
     prov.sync_installer()
     mode = prov.channel_mode(channel)
-    prov.remove(channel)
+    try:
+        prov.remove(channel)
+    except RuntimeError:
+        # absence is fine: a prior failed rotate may have removed the node
+        # already; apply below recreates it from scratch
+        pass
     if user.get("telemost_url"):
         conf = build_channel_config(
             channel=channel,
