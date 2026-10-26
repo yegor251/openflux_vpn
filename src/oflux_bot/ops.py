@@ -24,7 +24,7 @@ from docprovider import (
     make_link,
     parse_link,
 )
-from docprovider.cupsrooms import create_rooms, pack_rooms  # noqa: F401 - admin-side utility
+from docprovider.cupsrooms import CupsRoomError, create_rooms, pack_rooms
 from docprovider.telemostconf import TelemostAuthError, create_conference
 from oflux_admin.channels import channel_for
 from oflux_admin.config import UserRegistry
@@ -114,28 +114,38 @@ def issue_channel(
     if registry.active_count(server.name) >= server.max_channels:
         raise RuntimeError("сервер переполнен, попробуйте позже")
 
-    carrier_kind = "telemost" if telemost_url else "cups"
+    carrier_kind = "cups" if not telemost_url else "telemost"
     rooms = None
     if not telemost_url:
+        # carrier 1: cups — a set from the pool, or minted right here (cups
+        # rate-limits creation after volume; when it refuses, fall through)
         try:
             rooms = _pop_room_set(cfg)
         except RuntimeError:
-            # pool empty: fall back to a fresh Telemost conference (created
-            # from the admin session file; lives ~24 h without activity and
-            # extends while the channel is in use)
+            rooms = None
+        if rooms is None:
+            try:
+                rooms = pack_rooms(create_rooms())
+                carrier_kind = "cups"
+            except CupsRoomError:
+                rooms = None
+        if rooms is None:
+            # carrier 2: a fresh Telemost conference, created from the admin
+            # session file; lives ~24 h without activity and extends while
+            # the channel is in use
+            carrier_kind = "telemost"
             session_file = str(cfg.config_dir / TELEMOST_SESSION_FILE)
             import pathlib as _pathlib
 
             if not _pathlib.Path(session_file).exists():
                 raise RuntimeError(
-                    "пул комнат пуст и нет файла сессии telemost — запусти "
-                    "scripts/refill_cups_pool.py на машине админа"
+                    "cups отказал в создании комнат и нет файла сессии telemost — "
+                    "запусти scripts/refill_cups_pool.py на машине админа"
                 )
             try:
                 telemost_url = create_conference(session_file)
             except TelemostAuthError as exc:
                 raise RuntimeError(f"сессия telemost истекла: {exc}") from exc
-            carrier_kind = "telemost"
 
     key = secrets.token_hex(32)
     port = registry.alloc_port(server)
