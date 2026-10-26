@@ -25,6 +25,7 @@ from docprovider import (
     parse_link,
 )
 from docprovider.cupsrooms import create_rooms, pack_rooms  # noqa: F401 - admin-side utility
+from docprovider.telemostconf import TelemostAuthError, create_conference
 from oflux_admin.channels import channel_for
 from oflux_admin.config import UserRegistry
 from oflux_admin.localops import LocalOps
@@ -38,6 +39,7 @@ from .config import BotConfig, BotUsers, mask_link
 # (scripts/refill_cups_pool.py) into a pool; /issue pops one set.
 POOL_PATH = "cups-pool.json"
 ROOMS_PER_SET = 8
+TELEMOST_SESSION_FILE = "telemost-session-cookies.txt"
 
 
 def _pop_room_set(cfg: BotConfig) -> str:
@@ -113,7 +115,27 @@ def issue_channel(
         raise RuntimeError("сервер переполнен, попробуйте позже")
 
     carrier_kind = "telemost" if telemost_url else "cups"
-    rooms = None if telemost_url else _pop_room_set(cfg)
+    rooms = None
+    if not telemost_url:
+        try:
+            rooms = _pop_room_set(cfg)
+        except RuntimeError:
+            # pool empty: fall back to a fresh Telemost conference (created
+            # from the admin session file; lives ~24 h without activity and
+            # extends while the channel is in use)
+            session_file = str(cfg.config_dir / TELEMOST_SESSION_FILE)
+            import pathlib as _pathlib
+
+            if not _pathlib.Path(session_file).exists():
+                raise RuntimeError(
+                    "пул комнат пуст и нет файла сессии telemost — запусти "
+                    "scripts/refill_cups_pool.py на машине админа"
+                )
+            try:
+                telemost_url = create_conference(session_file)
+            except TelemostAuthError as exc:
+                raise RuntimeError(f"сессия telemost истекла: {exc}") from exc
+            carrier_kind = "telemost"
 
     key = secrets.token_hex(32)
     port = registry.alloc_port(server)
