@@ -19,8 +19,19 @@ from aiogram.types import BufferedInputFile, Message, ReplyKeyboardRemove
 
 import qrcode
 
+from .alerts import SPARE
 from .config import BotConfig, BotUsers
-from .ops import doctor_channel, issue_channel, reissue_link, revoke_channel, rotate_channel
+from .ops import (
+    carrier_of,
+    doctor_channel,
+    issue_channel,
+    load_registry,
+    migrate_user_channel,
+    reissue_link,
+    retire_channel,
+    revoke_channel,
+    rotate_channel,
+)
 
 BOT_COMMANDS = [
     ("start", "Меню с кнопками"),
@@ -211,7 +222,26 @@ class _MsgAsUser:
         return getattr(self._message, name)
 
 
-def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUsers) -> None:
+def migration_target(cfg: BotConfig, carrier_monitor, bot_users: BotUsers, tg_id: int):
+    """(target_carrier, old_channel, back_to|None) when /issue should MOVE
+    this user instead of refusing: their carrier is failed, or they sit on
+    the spare of a recovered carrier and may move back (R4)."""
+    channel = bot_users.channel_of(tg_id)
+    if not channel:
+        return None
+    user = load_registry(cfg).get(channel) or {}
+    kind = carrier_of(user)
+    if kind and carrier_monitor.failed(kind):
+        return SPARE[kind], channel, None
+    for carrier in carrier_monitor.recovered_carriers():
+        if channel in carrier_monitor.moved_channels(carrier):
+            return carrier, channel, carrier
+    return None
+
+
+def register_handlers(
+    dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUsers, carrier_monitor=None
+) -> None:
     # issuance is long; a double-tap must not create two channels
     issue_lock = asyncio.Lock()
     # channel mutations: a second tap on "Подтверждаю" must never re-enter
@@ -226,12 +256,43 @@ def register_handlers(dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUs
     async def _do_issue(message: Message) -> None:
         tg_id = message.from_user.id
         async with issue_lock:
-            if bot_users.channel_of(tg_id):  # re-check under the lock
-                await clean(
-                    message,
-                    "У тебя уже есть канал. Один канал на пользователя.",
-                    reply_markup=_menu_kb(True),
+            channel = bot_users.channel_of(tg_id)  # re-check under the lock
+            if channel:
+                # a dead carrier (or a way-back offer) turns /issue into the
+                # move: a fresh channel on the other carrier, old one retired
+                move = (
+                    migration_target(cfg, carrier_monitor, bot_users, tg_id)
+                    if carrier_monitor
+                    else None
                 )
+                if move is None:
+                    await clean(
+                        message,
+                        "У тебя уже есть канал. Один канал на пользователя.",
+                        reply_markup=_menu_kb(True),
+                    )
+                    return
+                target, old_channel, back_to = move
+                note = f"готов ({target}" + (", возврат на основной)" if back_to else ", запасной)")
+                # plain message on purpose: a message sent with ReplyKeyboardRemove
+                # can never be edited by the bot (Telegram rejects editMessageText)
+                msg = await message.answer(f"Переезжаю: новый канал на носителе {target}...")
+                try:
+                    result = await asyncio.to_thread(
+                        migrate_user_channel, cfg, bot_users, old_channel, target
+                    )
+                except Exception as exc:  # noqa: BLE001 - user-facing error text
+                    await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
+                    await clean(message, "Что дальше?", reply_markup=_menu_kb(True))
+                    return
+                await msg.edit_text(_link_message(result["channel"], result["link"], note))
+                await message.answer_photo(
+                    qr_photo(result["link"]), caption="QR для приложения",
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+                await asyncio.to_thread(retire_channel, cfg, old_channel)
+                if back_to:
+                    carrier_monitor.drop_moved(back_to, old_channel)
                 return
             # plain message on purpose: a message sent with ReplyKeyboardRemove
             # can never be edited by the bot (Telegram rejects editMessageText)

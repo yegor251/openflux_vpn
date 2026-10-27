@@ -111,6 +111,336 @@ def test_mass_alert_retries_until_delivered(monkeypatch):
     assert len([s for s in sent if "МАССОВЫЙ" in s]) == 1
 
 
+# -- carrier verdicts (R1/R2) -------------------------------------------------
+
+def _pack(rooms):
+    from docprovider.cupsrooms import pack_rooms
+
+    return pack_rooms(rooms)
+
+
+def test_carrier_monitor_verdicts_and_persistence(tmp_path):
+    from oflux_bot.alerts import CarrierMonitor
+
+    m = CarrierMonitor(tmp_path / "carrier-state.json")
+    assert [m.feed("cups", False, now=t) for t in (1, 2)] == [None, None]
+    assert m.feed("cups", False, now=3) == "failed"
+    assert m.feed("cups", False, now=4) is None  # already marked
+    # the mark survives a restart (fresh instance, same file)
+    m2 = CarrierMonitor(tmp_path / "carrier-state.json")
+    assert m2.failed("cups") and m2.failed_carriers() == ["cups"]
+    # recovery needs M consecutive oks
+    assert m2.feed("cups", True, now=5) is None
+    assert m2.feed("cups", True, now=6) == "recovered"
+    assert m2.recovered_carriers() == ["cups"] and not m2.failed("cups")
+
+
+def test_carrier_monitor_moved_bookkeeping(tmp_path):
+    from oflux_bot.alerts import CarrierMonitor
+
+    m = CarrierMonitor(tmp_path / "carrier-state.json")
+    m.record_moved("cups", "of-a")
+    m.record_moved("cups", "of-a")  # no duplicates
+    m.record_moved("cups", "of-b")
+    assert m.moved_channels("cups") == ["of-a", "of-b"]
+    m2 = CarrierMonitor(tmp_path / "carrier-state.json")
+    assert m2.moved_channels("cups") == ["of-a", "of-b"]
+    m2.drop_moved("cups", "of-a")
+    assert m2.moved_channels("cups") == ["of-b"]
+    m2.drop_moved("cups", "of-b")
+    assert m2.moved_channels("cups") == []  # everyone settled: entry gone
+
+
+def _carrier_watchdog(tmp_path, channels, admin, users, migrated, retired):
+    from oflux_bot.alerts import CarrierMonitor, Watchdog
+
+    class FakeRegistry:
+        def active(self):
+            return channels
+
+    class FakeCfg:
+        config_dir = tmp_path
+
+    def migrate(old, target):
+        migrated.append((old, target))
+        return {"channel": f"{old}-new", "link": f"openflux://v1/{old}-{target}"}
+
+    async def send(text):
+        admin.append(text)
+        return True
+
+    async def notify_user(tg, text, png=None):
+        users.append((tg, text))
+        return True
+
+    monitor = CarrierMonitor(tmp_path / "carrier-state.json")
+    return Watchdog(
+        FakeCfg(), FakeRegistry, send,
+        notify_user=notify_user,
+        carrier_monitor=monitor,
+        migrate=migrate,
+        retire=lambda ch: retired.append(ch),
+        undo=lambda new, old: migrated.append(("undo", new, old)),
+    )
+
+
+CUPS_A = {
+    "cups_url": _pack(["uuid-a"]), "carrier": "cups", "tg_id": 1,
+    "created": "2026-10-27T10:00:00+00:00",
+}
+CUPS_B = {
+    "cups_url": _pack(["uuid-b"]), "carrier": "cups", "tg_id": 2,
+    "created": "2026-10-27T10:01:00+00:00",
+}
+TELE_C = {
+    "telemost_url": "https://telemost.yandex.ru/j/1", "carrier": "telemost",
+    "tg_id": 3, "created": "2026-10-27T10:02:00+00:00",
+}
+
+
+def test_carrier_failure_migrates_users_to_spare(tmp_path, monkeypatch):
+    """R3: cups dead for everyone -> after K cycles the bot moves every
+    cups user to telemost with a link in the same message; telemost users
+    are not touched."""
+    import asyncio
+
+    from oflux_bot import alerts
+
+    monkeypatch.setattr(alerts, "probe_unit", lambda ch: True)
+    monkeypatch.setattr(alerts, "probe_carrier_url", lambda url: "telemost" in url)
+
+    admin, users, migrated, retired = [], [], [], []
+    wd = _carrier_watchdog(
+        tmp_path, {"of-a": dict(CUPS_A), "of-b": dict(CUPS_B), "of-c": dict(TELE_C)},
+        admin, users, migrated, retired,
+    )
+    for _ in range(alerts.K_FAILS):
+        asyncio.run(wd.run_once())
+
+    assert sum("носитель cups признан нерабочим" in t for t in admin) == 1
+    assert ("of-a", "telemost") in migrated and ("of-b", "telemost") in migrated
+    assert not any(old == "of-c" for old, _ in migrated)  # spare users untouched
+    # both moved users got a link + QR, nothing was rolled back
+    assert len(users) == 2 and all("openflux://" in t for _, t in users)
+    assert retired == []
+    state = wd.carrier._state
+    assert state["cups"]["failed"] is True
+    assert sorted(state["cups"]["moved"]) == ["of-a", "of-b"]
+
+
+def test_carrier_recovery_offers_way_back(tmp_path, monkeypatch):
+    """R4: cups dies (carrier verdict — not a reissue, even for a lone
+    channel), then recovers -> the moved user is offered the return,
+    nobody is forced to move."""
+    import asyncio
+
+    from oflux_bot import alerts
+
+    cups_alive = {"ok": False}
+    monkeypatch.setattr(alerts, "probe_unit", lambda ch: True)
+    monkeypatch.setattr(
+        alerts, "probe_carrier_url", lambda url: "cups" in url and cups_alive["ok"]
+    )
+
+    admin, users, migrated, retired = [], [], [], []
+    wd = _carrier_watchdog(tmp_path, {"of-a": dict(CUPS_A)}, admin, users, migrated, retired)
+    for _ in range(alerts.K_FAILS):
+        asyncio.run(wd.run_once())
+    assert migrated == [("of-a", "telemost")]  # carrier verdict, no reissue
+    assert wd.carrier.failed("cups")
+
+    cups_alive["ok"] = True  # cups back up
+    for _ in range(alerts.M_OKS):
+        asyncio.run(wd.run_once())
+    assert sum("носитель cups восстановился" in t for t in admin) == 1
+    assert users[-1] == (1, alerts._BACK_TEXT)  # the way back is offered
+    migrated.clear()
+    for _ in range(3):  # no forced moves, no repeats
+        asyncio.run(wd.run_once())
+    assert migrated == []
+
+
+def test_single_dead_channel_reissued_in_place(tmp_path, monkeypatch):
+    """One expired conference on a healthy carrier: only that user gets a
+    fresh link on the same carrier, at most once per hour."""
+    import asyncio
+
+    from oflux_bot import alerts
+
+    state = {"t2_dead": True}
+    monkeypatch.setattr(alerts, "probe_unit", lambda ch: True)
+    monkeypatch.setattr(
+        alerts, "probe_carrier_url",
+        lambda url: (False if "dead" in url and state["t2_dead"] else True),
+    )
+
+    admin, users, migrated, retired = [], [], [], []
+    dead = {"telemost_url": "https://telemost.yandex.ru/j/dead", "carrier": "telemost",
+            "tg_id": 2, "created": "2026-10-27T10:01:00+00:00"}
+    wd = _carrier_watchdog(
+        tmp_path, {"of-t1": dict(TELE_C), "of-t2": dead}, admin, users, migrated, retired,
+    )
+    for _ in range(alerts.K_FAILS):
+        asyncio.run(wd.run_once())
+
+    assert migrated == [("of-t2", "telemost")]  # same carrier, fresh conference
+    assert retired == ["of-t2"]  # the dead channel is retired after delivery
+    assert not wd.carrier.failed("telemost")  # the carrier itself is fine
+
+    state["t2_dead"] = False  # episode clears...
+    for _ in range(alerts.M_OKS):
+        asyncio.run(wd.run_once())
+    state["t2_dead"] = True  # ...and re-fires within the hour
+    for _ in range(alerts.K_FAILS):
+        asyncio.run(wd.run_once())
+
+    assert migrated == [("of-t2", "telemost")]  # hourly cap: no second reissue
+    assert any("авто-перевыписка за час уже была" in t for t in admin)
+
+
+def test_migration_rolls_back_when_link_undelivered(tmp_path, monkeypatch):
+    """Telegram down at delivery time: the fresh channel is undone, the old
+    one stays, nobody is marked moved (the retry happens next cycle)."""
+    import asyncio
+
+    from oflux_bot import alerts
+
+    monkeypatch.setattr(alerts, "probe_unit", lambda ch: True)
+    monkeypatch.setattr(alerts, "probe_carrier_url", lambda url: "telemost" in url)
+
+    admin, users, migrated, retired = [], [], [], []
+    wd = _carrier_watchdog(tmp_path, {"of-a": dict(CUPS_A)}, admin, users, migrated, retired)
+
+    async def undelivered(tg, text, png=None):
+        users.append((tg, text))
+        return False
+
+    wd.notify_user = undelivered
+
+    for _ in range(alerts.K_FAILS):
+        asyncio.run(wd.run_once())
+
+    assert migrated[-1] == ("undo", "of-a-new", "of-a")
+    assert retired == []  # the old channel was never touched
+    assert wd.carrier.moved_channels("cups") == []
+
+
+# -- /issue as the move (R3/R4 user-facing path) ------------------------------
+
+def test_issue_moves_user_when_carrier_failed(tmp_path, monkeypatch):
+    import asyncio
+
+    from aiogram import Dispatcher
+
+    from oflux_bot import handlers
+    from oflux_bot.alerts import CarrierMonitor
+    from oflux_bot.config import BotUsers
+
+    class FakeRegistry:
+        def get(self, ch):
+            return {"carrier": "cups", "cups_url": "x"} if ch == "chan-1" else None
+
+    calls = []
+    monkeypatch.setattr(handlers, "load_registry", lambda cfg: FakeRegistry())
+    monkeypatch.setattr(
+        handlers, "migrate_user_channel",
+        lambda cfg, bu, old, target:
+            calls.append((old, target)) or {"channel": "chan-2", "link": "openflux://v1/z"},
+    )
+    monkeypatch.setattr(handlers, "retire_channel", lambda cfg, ch: calls.append(("retire", ch)))
+
+    bot_users = BotUsers(tmp_path / "bot_users.json")
+    bot_users.bind_channel(7, "chan-1")
+    monitor = CarrierMonitor(tmp_path / "carrier-state.json")
+    for t in (1, 2, 3):
+        monitor.feed("cups", False, now=t)
+
+    dp = Dispatcher()
+    handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users, carrier_monitor=monitor)
+    issue = next(
+        h.callback for h in dp.message.handlers
+        if getattr(h.callback, "__name__", "") == "issue"
+    )
+
+    class FakeSent:
+        async def edit_text(self, text, **kw):
+            self.edited = text
+
+    class FakeMessage:
+        def __init__(self):
+            self.from_user = type("U", (), {"id": 7})()
+            self.answers = []
+
+        async def answer(self, text=None, **kw):
+            sent = FakeSent()
+            sent.text = text
+            self.answers.append((sent, kw))
+            return sent
+
+        async def answer_photo(self, *a, **kw):
+            self.answers.append((FakeSent(), {"photo": True}))
+
+    msg = FakeMessage()
+    asyncio.run(issue(msg))
+
+    assert ("chan-1", "telemost") in calls and ("retire", "chan-1") in calls
+    assert "chan-2" in msg.answers[0][0].edited  # the new link was delivered
+
+
+def test_issue_still_refuses_without_carrier_problem(tmp_path, monkeypatch):
+    import asyncio
+
+    from aiogram import Dispatcher
+
+    from oflux_bot import handlers
+    from oflux_bot.alerts import CarrierMonitor
+    from oflux_bot.config import BotUsers
+
+    class FakeRegistry:
+        def get(self, ch):
+            return {"carrier": "telemost", "telemost_url": "https://x"} if ch == "chan-1" else None
+
+    monkeypatch.setattr(handlers, "load_registry", lambda cfg: FakeRegistry())
+    monkeypatch.setattr(
+        handlers, "migrate_user_channel",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not migrate")),
+    )
+
+    bot_users = BotUsers(tmp_path / "bot_users.json")
+    bot_users.bind_channel(7, "chan-1")
+    monitor = CarrierMonitor(tmp_path / "carrier-state.json")
+
+    dp = Dispatcher()
+    handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users, carrier_monitor=monitor)
+    issue = next(
+        h.callback for h in dp.message.handlers
+        if getattr(h.callback, "__name__", "") == "issue"
+    )
+
+    class FakeSent:
+        async def edit_text(self, text, **kw):
+            self.edited = text
+
+    class FakeMessage:
+        def __init__(self):
+            self.from_user = type("U", (), {"id": 7})()
+            self.answers = []
+
+        async def answer(self, text=None, **kw):
+            sent = FakeSent()
+            sent.text = text
+            self.answers.append((sent, kw))
+            return sent
+
+        async def answer_photo(self, *a, **kw):
+            self.answers.append((FakeSent(), {"photo": True}))
+
+    msg = FakeMessage()
+    asyncio.run(issue(msg))
+
+    assert msg.answers[0][0].text.startswith("У тебя уже есть канал")
+
+
 # -- link masking ------------------------------------------------------------
 
 def test_mask_link_hides_key():

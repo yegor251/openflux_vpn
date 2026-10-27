@@ -61,6 +61,31 @@ def _pop_room_set(cfg: BotConfig) -> str:
     return rooms
 
 
+def _push_room_set_back(cfg: BotConfig, rooms: str) -> None:
+    # never used by a live channel: put it back at the front of the pool
+    LocalOps().run(
+        "python3 -c "
+        f"'import json,pathlib; p=pathlib.Path(\"{cfg.config_dir}/{POOL_PATH}\"); "
+        f"d=json.loads(p.read_text()); d[\"sets\"].insert(0, \"{rooms}\"); "
+        "p.write_text(json.dumps(d, indent=1))'"
+    )
+
+
+def _telemost_url(cfg: BotConfig) -> str:
+    """A fresh conference from the admin session file (lives ~24 h without
+    activity, extends while the channel is in use)."""
+    session_file = str(cfg.config_dir / TELEMOST_SESSION_FILE)
+    if not Path(session_file).exists():
+        raise RuntimeError(
+            "нет файла сессии telemost — залогинься в telemost.yandex.ru и захвати "
+            "запрос создания конференции (см. telemostconf.py)"
+        )
+    try:
+        return create_conference(session_file)
+    except TelemostAuthError as exc:
+        raise RuntimeError(f"сессия telemost истекла: {exc}") from exc
+
+
 def _finalize_carrier_conf(ops: LocalOps, channel: str, marker: str, timeout_s: int = 60) -> None:
     """A carrier node is ready when its conf carries only the carrier: drop
     the installer's always-on direct listener (a dual-transport exit
@@ -87,6 +112,83 @@ def _registry(cfg: BotConfig) -> UserRegistry:
     return UserRegistry(cfg.registry_path)
 
 
+def load_registry(cfg: BotConfig) -> UserRegistry:
+    """Fresh registry view (the file changes between operations)."""
+    return _registry(cfg)
+
+
+def carrier_of(user: dict) -> str | None:
+    """Carrier a registry entry sits on (explicit field for new entries,
+    derived for older ones that predate it)."""
+    if user.get("carrier"):
+        return user["carrier"]
+    if user.get("telemost_url"):
+        return "telemost"
+    if user.get("cups_url"):
+        return "cups"
+    return None
+
+
+def _fresh_channel(
+    cfg: BotConfig,
+    registry: UserRegistry,
+    base: str,
+    tg_id: int | None,
+    *,
+    carrier_kind: str,
+    rooms: str | None,
+    telemost_url: str | None,
+) -> dict:
+    """Allocate a name and port, apply the node, finalize the carrier,
+    make + re-parse the link, register the channel. Raises on any step."""
+    server = cfg.admin.server(None)
+    channel = channel_for(base)
+    while registry.get(channel):
+        channel = channel_for(f"{base}-{secrets.token_hex(2)}")
+    key = secrets.token_hex(32)
+    port = registry.alloc_port(server)
+    ops = LocalOps()
+    prov = Provisioner(ops, cfg.admin.settings.installer)
+    prov.sync_installer()
+    prov.probe()
+    conf = build_channel_config(
+        channel=channel, key=key, port=port,
+        cupsonline=rooms or "", telemost_url=telemost_url or "", mode="l3",
+    )
+    try:
+        result = prov.apply(channel, conf)
+        _finalize_carrier_conf(ops, channel, CARRIER_MARKERS[carrier_kind])
+    except Exception:
+        if rooms:
+            _push_room_set_back(cfg, rooms)
+        raise
+
+    link = make_link(
+        name=channel,
+        secret=key,
+        cups_url=rooms,
+        telemost_url=telemost_url,
+        binary=cfg.admin.settings.openflux_bin,
+    )
+    parse_link(link, binary=cfg.admin.settings.openflux_bin)
+
+    registry.add(
+        channel,
+        channel=channel,
+        key=key,
+        port=int(result.get("port", port)),
+        vds=server.name,
+        host=server.host,
+        cups_url=rooms,
+        telemost_url=telemost_url,
+        carrier=carrier_kind,
+        link=link,
+        tg_id=tg_id,
+        created=_now(),
+    )
+    return {"channel": channel, "port": int(result.get("port", port)), "link": link}
+
+
 def issue_channel(
     cfg: BotConfig,
     bot_users: BotUsers,
@@ -108,9 +210,6 @@ def issue_channel(
     registry = _registry(cfg)
     server = cfg.admin.server(None)
     base = name_base or f"user{tg_id}"
-    channel = channel_for(base)
-    while registry.get(channel):
-        channel = channel_for(f"{base}-{secrets.token_hex(2)}")
     if registry.active_count(server.name) >= server.max_channels:
         raise RuntimeError("сервер переполнен, попробуйте позже")
 
@@ -134,69 +233,78 @@ def issue_channel(
             # session file; lives ~24 h without activity and extends while
             # the channel is in use
             carrier_kind = "telemost"
-            session_file = str(cfg.config_dir / TELEMOST_SESSION_FILE)
-            import pathlib as _pathlib
+            telemost_url = _telemost_url(cfg)
 
-            if not _pathlib.Path(session_file).exists():
-                raise RuntimeError(
-                    "cups отказал в создании комнат и нет файла сессии telemost — "
-                    "запусти scripts/refill_cups_pool.py на машине админа"
-                )
-            try:
-                telemost_url = create_conference(session_file)
-            except TelemostAuthError as exc:
-                raise RuntimeError(f"сессия telemost истекла: {exc}") from exc
+    result = _fresh_channel(
+        cfg, registry, base, tg_id,
+        carrier_kind=carrier_kind, rooms=rooms, telemost_url=telemost_url,
+    )
+    bot_users.bind_channel(tg_id, result["channel"])
+    return result
 
-    key = secrets.token_hex(32)
-    port = registry.alloc_port(server)
-    ops = LocalOps()
-    prov = Provisioner(ops, cfg.admin.settings.installer)
+
+def migrate_user_channel(
+    cfg: BotConfig, bot_users: BotUsers, old_channel: str, target_carrier: str
+) -> dict:
+    """Hand a user over to target_carrier: a fresh channel (new rooms or
+    conference, new key) replaces theirs, the TG binding switches at once.
+
+    Replacement semantics: per-user/server caps are not consulted (the net
+    channel count does not grow). The old channel is retired by the caller
+    AFTER the new link is delivered — until then a failed hand-over can be
+    undone with undo_migration. Raises on any failure; the old channel
+    stays untouched."""
+    registry = _registry(cfg)
+    user = registry.get(old_channel)
+    if not user or user.get("revoked"):
+        raise RuntimeError("канал не найден или отозван")
+    if target_carrier not in ("cups", "telemost"):
+        raise RuntimeError(f"неизвестный носитель: {target_carrier}")
+
+    rooms = telemost_url = None
+    if target_carrier == "cups":
+        try:
+            rooms = _pop_room_set(cfg)
+        except RuntimeError:
+            rooms = None
+        if rooms is None:
+            # CupsRoomError propagates: the spare refused, nobody moves
+            rooms = pack_rooms(create_rooms())
+    else:
+        telemost_url = _telemost_url(cfg)
+
+    tg_id = user.get("tg_id")
+    base = f"user{tg_id}" if tg_id else old_channel
+    result = _fresh_channel(
+        cfg, registry, base, tg_id,
+        carrier_kind=target_carrier, rooms=rooms, telemost_url=telemost_url,
+    )
+    if tg_id:
+        bot_users.bind_channel(tg_id, result["channel"])
+    return result
+
+
+def retire_channel(cfg: BotConfig, channel: str) -> None:
+    """Remove a replaced channel's node and mark it revoked (binding stays
+    with the replacement)."""
+    prov = Provisioner(LocalOps(), cfg.admin.settings.installer)
     prov.sync_installer()
-    prov.probe()
-    conf = build_channel_config(
-        channel=channel, key=key, port=port,
-        cupsonline=rooms or "", telemost_url=telemost_url or "", mode="l3",
-    )
     try:
-        result = prov.apply(channel, conf)
-        _finalize_carrier_conf(ops, channel, CARRIER_MARKERS[carrier_kind])
-    except Exception:
-        if rooms:
-            # never used by a live channel: put it back at the front of the pool
-            ops.run(
-                "python3 -c "
-                f"'import json,pathlib; p=pathlib.Path(\"{cfg.config_dir}/{POOL_PATH}\"); "
-                f"d=json.loads(p.read_text()); d[\"sets\"].insert(0, \"{rooms}\"); "
-                "p.write_text(json.dumps(d, indent=1))'"
-            )
-        raise
+        prov.remove(channel)
+    except RuntimeError:
+        pass  # already gone (a prior failed retire) - revocation is the point
+    _registry(cfg).revoke(channel)
 
-    link = make_link(
-        name=channel,
-        secret=key,
-        cups_url=rooms,
-        telemost_url=telemost_url,
-        binary=cfg.admin.settings.openflux_bin,
-    )
-    parse_link(link, binary=cfg.admin.settings.openflux_bin)
 
-    port_final = int(result.get("port", port))
-    registry.add(
-        channel,
-        channel=channel,
-        key=key,
-        port=port_final,
-        vds=server.name,
-        host=server.host,
-        cups_url=rooms,
-        telemost_url=telemost_url,
-        carrier=carrier_kind,
-        link=link,
-        tg_id=tg_id,
-        created=_now(),
-    )
-    bot_users.bind_channel(tg_id, channel)
-    return {"channel": channel, "port": port_final, "link": link}
+def undo_migration(cfg: BotConfig, bot_users: BotUsers, new_channel: str, old_channel: str) -> None:
+    """Roll a hand-over back (the new link could not be delivered): drop the
+    fresh channel, restore the old binding. The old node was never touched."""
+    registry = _registry(cfg)
+    user = registry.get(new_channel)
+    tg_id = user.get("tg_id") if user else None
+    retire_channel(cfg, new_channel)
+    if tg_id:
+        bot_users.bind_channel(tg_id, old_channel)
 
 
 def reissue_link(cfg: BotConfig, channel: str) -> str:
@@ -365,10 +473,15 @@ def _now() -> str:
 
 
 __all__ = [
+    "carrier_of",
     "issue_channel",
+    "load_registry",
+    "migrate_user_channel",
     "reissue_link",
+    "retire_channel",
     "rotate_channel",
     "revoke_channel",
     "doctor_channel",
+    "undo_migration",
     "mask_link",
 ]

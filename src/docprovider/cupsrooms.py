@@ -64,3 +64,9 @@ def pack_rooms(ids: list[str], version: int = 2) -> str:
     payload: dict | list = {"v": version, "rooms": list(ids)} if version >= 2 else list(ids)
     raw = json.dumps(payload, separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def first_room(packed: str) -> str:
+    """First room uuid of a packed set (the watchdog probes it for liveness)."""
+    raw = base64.urlsafe_b64decode(packed + "=" * (-len(packed) % 4))
+    return json.loads(raw)["rooms"][0]

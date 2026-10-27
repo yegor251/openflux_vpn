@@ -14,18 +14,17 @@ from aiogram import Bot, Dispatcher
 
 from oflux_admin.config import UserRegistry
 
-from .alerts import CHECK_INTERVAL_S, Watchdog
+from .alerts import CHECK_INTERVAL_S, CarrierMonitor, Watchdog
 from .config import BotConfig, BotUsers, load_bot_config
 from .handlers import register_handlers, set_command_menu
+from .ops import migrate_user_channel, retire_channel, undo_migration
 
 
 def _log() -> logging.Logger:
     return logging.getLogger("oflux_bot")
 
 
-async def _watchdog_loop(cfg: BotConfig, bot: Bot) -> None:
-    from oflux_admin.config import UserRegistry
-
+async def _watchdog_loop(cfg: BotConfig, bot: Bot, bot_users: BotUsers, carrier: CarrierMonitor) -> None:
     async def send(text: str) -> bool:
         try:
             await bot.send_message(cfg.alert_tg_id, text)
@@ -34,7 +33,28 @@ async def _watchdog_loop(cfg: BotConfig, bot: Bot) -> None:
             _log().warning("alert delivery failed: %s", exc)
             return False
 
-    watchdog = Watchdog(cfg, lambda: UserRegistry(cfg.registry_path), send)
+    async def notify_user(tg_id: int, text: str, png: bytes | None = None) -> bool:
+        try:
+            await bot.send_message(tg_id, text)
+            if png is not None:
+                from aiogram.types import BufferedInputFile
+
+                await bot.send_photo(tg_id, BufferedInputFile(png, filename="channel-qr.png"))
+            return True
+        except Exception as exc:  # noqa: BLE001 - alerts must never crash the loop
+            _log().warning("user notification failed: %s", exc)
+            return False
+
+    watchdog = Watchdog(
+        cfg,
+        lambda: UserRegistry(cfg.registry_path),
+        send,
+        notify_user=notify_user,
+        carrier_monitor=carrier,
+        migrate=lambda old, target: migrate_user_channel(cfg, bot_users, old, target),
+        retire=lambda channel: retire_channel(cfg, channel),
+        undo=lambda new, old: undo_migration(cfg, bot_users, new, old),
+    )
     while True:
         try:
             await watchdog.run_once()
@@ -49,10 +69,11 @@ async def amain(cfg: BotConfig) -> None:
     bot = Bot(cfg.token)
     dp = Dispatcher()
     bot_users = BotUsers(cfg.state_path)
-    register_handlers(dp, bot, cfg, bot_users)
+    carrier = CarrierMonitor(cfg.config_dir / "carrier-state.json")
+    register_handlers(dp, bot, cfg, bot_users, carrier_monitor=carrier)
     set_command_menu(bot)
 
-    asyncio.create_task(_watchdog_loop(cfg, bot))
+    asyncio.create_task(_watchdog_loop(cfg, bot, bot_users, carrier))
     _log().info("oflux-bot started (alert_tg_id=%s)", cfg.alert_tg_id)
     # Telegram outages must degrade to "retry", never kill the process
     while True:

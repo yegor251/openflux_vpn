@@ -148,7 +148,13 @@ l3 (UDP NAT) этот стенд НЕ проверяет — только жив
 ## Telegram-бот (oflux_bot)
 
 - Код: `src/oflux_bot/`, живёт на VPS (`systemctl status oflux-bot`),
-  деплой — `scripts/deploy_bot.sh` (idempotent после каждого push).
+  деплой — `scripts/deploy_bot.sh` (idempotent после каждого push) +
+  `systemctl restart oflux-bot`.
+- Авто-переезд при смерти носителя: watchdog пробует страницы носителей
+  (read-only GET, `alerts.probe_carrier_url`), вердикт в
+  `carrier-state.json`; умерший носитель = всем его пользователям бот
+  сам выдаёт ссылки на запасном (cups ↔ telemost) и отзывает старое;
+  возврат после восстановления — по желанию через /issue.
 - Секреты на VPS: `/root/.config/oflux-bot/` — `bot.yaml` (токен +
   alert_tg_id), `users.json` (реестр — рабочая копия/мастер каналов,
   выпущенных ботом!), `ya-cookies.txt`. Всё 0600, вне git.

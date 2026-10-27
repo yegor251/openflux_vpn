@@ -80,3 +80,10 @@ def test_channel_config_carries_cupsonline():
     )
     assert "cupsonline=eyJ2Ijoy" in conf
     assert "yandex=" not in conf
+
+
+def test_first_room_roundtrip():
+    from docprovider.cupsrooms import first_room
+
+    packed = pack_rooms(["u-1", "u-2"])
+    assert first_room(packed) == "u-1"
