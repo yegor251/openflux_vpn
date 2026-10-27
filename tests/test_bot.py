@@ -325,6 +325,43 @@ def test_migration_rolls_back_when_link_undelivered(tmp_path, monkeypatch):
     assert wd.carrier.moved_channels("cups") == []
 
 
+def test_failed_migration_pass_backs_off(tmp_path, monkeypatch):
+    """Delivery impossible (Telegram down): the hand-over rolls back and is
+    NOT re-attempted every cycle - a failed pass backs off before re-minting."""
+    import asyncio
+
+    from oflux_bot import alerts
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(alerts.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(alerts, "probe_unit", lambda ch: True)
+    monkeypatch.setattr(alerts, "probe_carrier_url", lambda url: "telemost" in url)
+
+    admin, users, migrated, retired = [], [], [], []
+    wd = _carrier_watchdog(tmp_path, {"of-a": dict(CUPS_A)}, admin, users, migrated, retired)
+
+    async def undelivered(tg, text, png=None):
+        return False
+
+    wd.notify_user = undelivered
+
+    for _ in range(alerts.K_FAILS):  # pass 1: migrate + rollback
+        asyncio.run(wd.run_once())
+    passes = [m for m in migrated if m != ("undo", "of-a-new", "of-a")]
+    assert len(passes) == 1
+
+    clock["t"] += 300  # next cycle, well inside the backoff window
+    for _ in range(alerts.K_FAILS):
+        asyncio.run(wd.run_once())
+    passes = [m for m in migrated if m != ("undo", "of-a-new", "of-a")]
+    assert len(passes) == 1  # no re-mint during the backoff
+
+    clock["t"] += alerts.MIGRATE_RETRY_S + 1
+    asyncio.run(wd.run_once())
+    passes = [m for m in migrated if m != ("undo", "of-a-new", "of-a")]
+    assert len(passes) == 2  # backoff over: it tries again
+
+
 # -- /issue as the move (R3/R4 user-facing path) ------------------------------
 
 def test_issue_moves_user_when_carrier_failed(tmp_path, monkeypatch):

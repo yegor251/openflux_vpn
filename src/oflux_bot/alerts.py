@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import time
@@ -40,9 +41,10 @@ from docprovider.cupsrooms import ROOM_URL, first_room
 COOLDOWN_S = 3600
 K_FAILS = 3
 M_OKS = 2
-CHECK_INTERVAL_S = 300
+CHECK_INTERVAL_S = int(os.environ.get("OFLUX_CHECK_INTERVAL_S", "300"))
 BACKUP_MAX_AGE_S = 36 * 3600  # daily cron on the admin machine + slack
 REISSUE_CAP_S = 3600  # at most one auto-reissue per channel per hour
+MIGRATE_RETRY_S = 900  # a failed hand-over pass backs off before re-minting
 
 CARRIER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -312,6 +314,7 @@ class Watchdog:
         self.undo = undo
         self.state = AlertState()
         self._reissued_at: dict[str, float] = {}
+        self._migrate_attempted_at: dict[str, float] = {}
 
     async def run_once(self) -> None:
         channels = self.registry_source().active()
@@ -356,9 +359,16 @@ class Watchdog:
                     await self.send(f"🟢 носитель {kind} восстановился")
                     await self._offer_return(kind)
             # (re)run the hand-over for every carrier still marked failed;
-            # migrated users drop out because their channel now sits on the spare
+            # migrated users drop out because their channel now sits on the
+            # spare. A failed pass (e.g. Telegram down at delivery time)
+            # backs off: retrying immediately would mint a fresh conference
+            # every cycle for nothing.
             if self.migrate is not None:
+                now = time.time()
                 for kind in self.carrier.failed_carriers():
+                    if now - self._migrate_attempted_at.get(kind, 0.0) < MIGRATE_RETRY_S:
+                        continue
+                    self._migrate_attempted_at[kind] = now
                     targets = {c: u for c, u in channels.items() if _kind_of(u) == kind}
                     if targets:
                         await self._migrate_carrier(kind, SPARE[kind], targets)
