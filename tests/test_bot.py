@@ -1,6 +1,7 @@
 """oflux_bot pure logic: invite tokens, alert dedup, link masking."""
 
 import os
+from datetime import datetime, timezone
 
 from oflux_bot.alerts import BACKUP_MAX_AGE_S, AlertState, probe_backup
 from oflux_bot.config import BotUsers, bot_config_dir, mask_link
@@ -151,7 +152,7 @@ def test_carrier_monitor_moved_bookkeeping(tmp_path):
     assert m2.moved_channels("cups") == []  # everyone settled: entry gone
 
 
-def _carrier_watchdog(tmp_path, channels, admin, users, migrated, retired):
+def _carrier_watchdog(tmp_path, channels, admin, users):
     from oflux_bot.alerts import CarrierMonitor, Watchdog
 
     class FakeRegistry:
@@ -160,10 +161,6 @@ def _carrier_watchdog(tmp_path, channels, admin, users, migrated, retired):
 
     class FakeCfg:
         config_dir = tmp_path
-
-    def migrate(old, target):
-        migrated.append((old, target))
-        return {"channel": f"{old}-new", "link": f"openflux://v1/{old}-{target}"}
 
     async def send(text):
         admin.append(text)
@@ -174,14 +171,7 @@ def _carrier_watchdog(tmp_path, channels, admin, users, migrated, retired):
         return True
 
     monitor = CarrierMonitor(tmp_path / "carrier-state.json")
-    return Watchdog(
-        FakeCfg(), FakeRegistry, send,
-        notify_user=notify_user,
-        carrier_monitor=monitor,
-        migrate=migrate,
-        retire=lambda ch: retired.append(ch),
-        undo=lambda new, old: migrated.append(("undo", new, old)),
-    )
+    return Watchdog(FakeCfg(), FakeRegistry, send, notify_user=notify_user, carrier_monitor=monitor)
 
 
 CUPS_A = {
@@ -198,10 +188,9 @@ TELE_C = {
 }
 
 
-def test_carrier_failure_migrates_users_to_spare(tmp_path, monkeypatch):
-    """R3: cups dead for everyone -> after K cycles the bot moves every
-    cups user to telemost with a link in the same message; telemost users
-    are not touched."""
+def test_carrier_failure_warns_users_instead_of_minting(tmp_path, monkeypatch):
+    """R3 (admin decision 2026-10-28): a dead carrier means ONE warning per
+    episode to each affected user — the bot never mints links by itself."""
     import asyncio
 
     from oflux_bot import alerts
@@ -209,157 +198,118 @@ def test_carrier_failure_migrates_users_to_spare(tmp_path, monkeypatch):
     monkeypatch.setattr(alerts, "probe_unit", lambda ch: True)
     monkeypatch.setattr(alerts, "probe_carrier_url", lambda url: "telemost" in url)
 
-    admin, users, migrated, retired = [], [], [], []
+    admin, users = [], []
     wd = _carrier_watchdog(
         tmp_path, {"of-a": dict(CUPS_A), "of-b": dict(CUPS_B), "of-c": dict(TELE_C)},
-        admin, users, migrated, retired,
+        admin, users,
     )
     for _ in range(alerts.K_FAILS):
         asyncio.run(wd.run_once())
 
     assert sum("носитель cups признан нерабочим" in t for t in admin) == 1
-    assert ("of-a", "telemost") in migrated and ("of-b", "telemost") in migrated
-    assert not any(old == "of-c" for old, _ in migrated)  # spare users untouched
-    # both moved users got a link + QR, nothing was rolled back
-    assert len(users) == 2 and all("openflux://" in t for _, t in users)
-    assert retired == []
-    state = wd.carrier._state
-    assert state["cups"]["failed"] is True
-    assert sorted(state["cups"]["moved"]) == ["of-a", "of-b"]
+    warnings = [t for tg, t in users if "/rotate" in t]
+    assert len(warnings) == 2  # both cups users, not the telemost one
+    assert wd.carrier.failed("cups")
+    users.clear()
+    for _ in range(alerts.K_FAILS):  # still dead: one warning per episode
+        asyncio.run(wd.run_once())
+    assert users == []
 
 
 def test_carrier_recovery_offers_way_back(tmp_path, monkeypatch):
-    """R4: cups dies (carrier verdict — not a reissue, even for a lone
-    channel), then recovers -> the moved user is offered the return,
-    nobody is forced to move."""
+    """R4: cups recovers -> admin gets the all-clear and the moved user is
+    offered the way back via /issue (never forced)."""
     import asyncio
 
     from oflux_bot import alerts
 
     cups_alive = {"ok": False}
-    monkeypatch.setattr(alerts, "probe_unit", lambda ch: True)
-    monkeypatch.setattr(
-        alerts, "probe_carrier_url", lambda url: "cups" in url and cups_alive["ok"]
-    )
 
-    admin, users, migrated, retired = [], [], [], []
-    wd = _carrier_watchdog(tmp_path, {"of-a": dict(CUPS_A)}, admin, users, migrated, retired)
+    def probe(url):
+        return True if "telemost" in url else cups_alive["ok"]
+
+    monkeypatch.setattr(alerts, "probe_unit", lambda ch: True)
+    monkeypatch.setattr(alerts, "probe_carrier_url", probe)
+
+    moved_user = {
+        "telemost_url": "https://telemost.yandex.ru/j/new", "carrier": "telemost",
+        "tg_id": 1, "created": "2026-10-28T00:00:00+00:00",
+    }
+    admin, users = [], []
+    wd = _carrier_watchdog(
+        tmp_path, {"of-b": dict(CUPS_B), "of-a-new": moved_user}, admin, users,
+    )
+    wd.carrier.record_moved("cups", "of-a-new")  # as the /rotate move records
+
     for _ in range(alerts.K_FAILS):
         asyncio.run(wd.run_once())
-    assert migrated == [("of-a", "telemost")]  # carrier verdict, no reissue
     assert wd.carrier.failed("cups")
+    assert any(tg == 2 and "/rotate" in t for tg, t in users)  # of-b still on cups
 
     cups_alive["ok"] = True  # cups back up
     for _ in range(alerts.M_OKS):
         asyncio.run(wd.run_once())
     assert sum("носитель cups восстановился" in t for t in admin) == 1
-    assert users[-1] == (1, alerts._BACK_TEXT)  # the way back is offered
-    migrated.clear()
-    for _ in range(3):  # no forced moves, no repeats
+    assert (1, alerts._BACK_TEXT) in users
+    users.clear()
+    for _ in range(3):  # no repeats after the offer
         asyncio.run(wd.run_once())
-    assert migrated == []
+    assert users == []
 
 
-def test_single_dead_channel_reissued_in_place(tmp_path, monkeypatch):
-    """One expired conference on a healthy carrier: only that user gets a
-    fresh link on the same carrier, at most once per hour."""
+def test_single_dead_channel_warns_once_per_episode(tmp_path, monkeypatch):
+    """One expired conference on a healthy carrier: only that user is told
+    to /rotate, once per episode; the carrier verdict stays clean."""
     import asyncio
 
     from oflux_bot import alerts
 
-    state = {"t2_dead": True}
     monkeypatch.setattr(alerts, "probe_unit", lambda ch: True)
-    monkeypatch.setattr(
-        alerts, "probe_carrier_url",
-        lambda url: (False if "dead" in url and state["t2_dead"] else True),
-    )
+    monkeypatch.setattr(alerts, "probe_carrier_url", lambda url: "dead" not in url)
 
-    admin, users, migrated, retired = [], [], [], []
+    admin, users = [], []
     dead = {"telemost_url": "https://telemost.yandex.ru/j/dead", "carrier": "telemost",
             "tg_id": 2, "created": "2026-10-27T10:01:00+00:00"}
     wd = _carrier_watchdog(
-        tmp_path, {"of-t1": dict(TELE_C), "of-t2": dead}, admin, users, migrated, retired,
+        tmp_path, {"of-t1": dict(TELE_C), "of-t2": dead}, admin, users,
     )
     for _ in range(alerts.K_FAILS):
         asyncio.run(wd.run_once())
 
-    assert migrated == [("of-t2", "telemost")]  # same carrier, fresh conference
-    assert retired == ["of-t2"]  # the dead channel is retired after delivery
+    assert users == [(2, alerts._channel_warning_text())]
     assert not wd.carrier.failed("telemost")  # the carrier itself is fine
-
-    state["t2_dead"] = False  # episode clears...
-    for _ in range(alerts.M_OKS):
+    for _ in range(alerts.K_FAILS):  # still dead in the fixture: quiet
         asyncio.run(wd.run_once())
-    state["t2_dead"] = True  # ...and re-fires within the hour
-    for _ in range(alerts.K_FAILS):
-        asyncio.run(wd.run_once())
-
-    assert migrated == [("of-t2", "telemost")]  # hourly cap: no second reissue
-    assert any("авто-перевыписка за час уже была" in t for t in admin)
+    assert users == [(2, alerts._channel_warning_text())]
 
 
-def test_migration_rolls_back_when_link_undelivered(tmp_path, monkeypatch):
-    """Telegram down at delivery time: the fresh channel is undone, the old
-    one stays, nobody is marked moved (the retry happens next cycle)."""
-    import asyncio
+def test_carrier_flap_dampening(tmp_path):
+    """Third failure episode within an hour -> unstable: verdicts go quiet
+    and recovery needs M * UNSTABLE_M_FACTOR good cycles."""
+    from oflux_bot.alerts import K_FAILS, M_OKS, UNSTABLE_M_FACTOR, CarrierMonitor
 
-    from oflux_bot import alerts
+    m = CarrierMonitor(tmp_path / "carrier-state.json")
+    t = 100.0
 
-    monkeypatch.setattr(alerts, "probe_unit", lambda ch: True)
-    monkeypatch.setattr(alerts, "probe_carrier_url", lambda url: "telemost" in url)
+    def run(ok, n):
+        nonlocal t
+        out = []
+        for _ in range(n):
+            t += 1
+            out.append(m.feed("cups", ok, now=t))
+        return out
 
-    admin, users, migrated, retired = [], [], [], []
-    wd = _carrier_watchdog(tmp_path, {"of-a": dict(CUPS_A)}, admin, users, migrated, retired)
-
-    async def undelivered(tg, text, png=None):
-        users.append((tg, text))
-        return False
-
-    wd.notify_user = undelivered
-
-    for _ in range(alerts.K_FAILS):
-        asyncio.run(wd.run_once())
-
-    assert migrated[-1] == ("undo", "of-a-new", "of-a")
-    assert retired == []  # the old channel was never touched
-    assert wd.carrier.moved_channels("cups") == []
-
-
-def test_failed_migration_pass_backs_off(tmp_path, monkeypatch):
-    """Delivery impossible (Telegram down): the hand-over rolls back and is
-    NOT re-attempted every cycle - a failed pass backs off before re-minting."""
-    import asyncio
-
-    from oflux_bot import alerts
-
-    clock = {"t": 1000.0}
-    monkeypatch.setattr(alerts.time, "time", lambda: clock["t"])
-    monkeypatch.setattr(alerts, "probe_unit", lambda ch: True)
-    monkeypatch.setattr(alerts, "probe_carrier_url", lambda url: "telemost" in url)
-
-    admin, users, migrated, retired = [], [], [], []
-    wd = _carrier_watchdog(tmp_path, {"of-a": dict(CUPS_A)}, admin, users, migrated, retired)
-
-    async def undelivered(tg, text, png=None):
-        return False
-
-    wd.notify_user = undelivered
-
-    for _ in range(alerts.K_FAILS):  # pass 1: migrate + rollback
-        asyncio.run(wd.run_once())
-    passes = [m for m in migrated if m != ("undo", "of-a-new", "of-a")]
-    assert len(passes) == 1
-
-    clock["t"] += 300  # next cycle, well inside the backoff window
-    for _ in range(alerts.K_FAILS):
-        asyncio.run(wd.run_once())
-    passes = [m for m in migrated if m != ("undo", "of-a-new", "of-a")]
-    assert len(passes) == 1  # no re-mint during the backoff
-
-    clock["t"] += alerts.MIGRATE_RETRY_S + 1
-    asyncio.run(wd.run_once())
-    passes = [m for m in migrated if m != ("undo", "of-a-new", "of-a")]
-    assert len(passes) == 2  # backoff over: it tries again
+    assert run(False, K_FAILS)[-1] == "failed"  # episode 1
+    assert run(True, M_OKS)[-1] == "recovered"
+    assert run(False, K_FAILS)[-1] == "failed"  # episode 2 (same hour)
+    assert run(True, M_OKS)[-1] == "recovered"
+    assert run(False, K_FAILS)[-1] == "unstable"  # episode 3 -> dampened
+    assert m.failed("cups")  # user-initiated moves stay available
+    assert run(False, 2 * K_FAILS) == [None] * (2 * K_FAILS)  # quiet
+    oks = run(True, M_OKS * UNSTABLE_M_FACTOR - 1)
+    assert oks == [None] * (M_OKS * UNSTABLE_M_FACTOR - 1)
+    assert run(True, 1) == ["recovered_stable"]
+    assert not m.failed("cups")
 
 
 # -- /issue as the move (R3/R4 user-facing path) ------------------------------
@@ -700,6 +650,7 @@ def test_rotate_double_tap_rotates_once(tmp_path, monkeypatch):
         return {"link": "openflux://v1/x"}
 
     monkeypatch.setattr(handlers, "rotate_channel", slow_rotate)
+    monkeypatch.setattr(handlers, "load_registry", lambda cfg: {"chan-1": {"rotated": None}})
 
     bot_users = BotUsers(tmp_path / "bot_users.json")
     bot_users.bind_channel(1134181734, "chan-1")
@@ -745,3 +696,111 @@ def test_rotate_double_tap_rotates_once(tmp_path, monkeypatch):
     assert q1.message.markup_dropped  # button removed on the first tap
     assert any(t == ("edit",) or "новый ключ" in t[1] for t in q1.message.texts if t[0] == "edit")
     assert any("Уже выполняется" in (a or "") for a in q2.answers)  # tap 2 rejected
+
+
+# -- rotate: cooldown + move on a dead carrier (admin decision 2026-10-28) ----
+
+def _confirm_handler(dp):
+    return next(
+        h.callback for h in dp.callback_query.handlers
+        if getattr(h.callback, "__name__", "") == "rotate_confirm"
+    )
+
+
+class _FakeMessage:
+    def __init__(self):
+        self.edits = []
+
+    async def edit_text(self, text, **kw):
+        self.edits.append(text)
+
+    async def edit_reply_markup(self, reply_markup=None):
+        self.markup_dropped = True
+
+    async def answer_photo(self, *a, **kw):
+        self.edits.append("<photo>")
+
+
+class _FakeQuery:
+    def __init__(self, user_id=9):
+        self.data = "rotate:chan-1"
+        self.from_user = type("U", (), {"id": user_id})()
+        self.message = _FakeMessage()
+        self.answers = []
+
+    async def answer(self, text=None, show_alert=False):
+        self.answers.append((text, show_alert))
+
+
+def test_rotate_has_cooldown(tmp_path, monkeypatch):
+    """A channel may change at most once per ROTATE_COOLDOWN_S."""
+    import asyncio
+
+    from aiogram import Dispatcher
+
+    from oflux_bot import handlers
+    from oflux_bot.config import BotUsers
+
+    calls = []
+    monkeypatch.setattr(handlers, "rotate_channel", lambda cfg, ch: calls.append(ch) or {"link": "openflux://v1/x"})
+    registry = {
+        "chan-1": {"rotated": "2026-10-01T00:00:00+00:00"},  # old -> cooldown over
+    }
+    monkeypatch.setattr(handlers, "load_registry", lambda cfg: registry)
+
+    bot_users = BotUsers(tmp_path / "bot_users.json")
+    bot_users.bind_channel(9, "chan-1")
+    dp = Dispatcher()
+    handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users)
+    confirm = _confirm_handler(dp)
+
+    asyncio.run(confirm(_FakeQuery()))
+    assert calls == ["chan-1"]  # old rotated ts: allowed
+
+    calls.clear()
+    registry["chan-1"]["rotated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    q = _FakeQuery()
+    asyncio.run(confirm(q))
+    assert calls == []  # just changed: refused
+    assert any("подожди" in (a[0] or "") for a in q.answers)
+
+
+def test_rotate_moves_to_spare_when_carrier_failed(tmp_path, monkeypatch):
+    """/rotate on a dead carrier is the move to the spare (as the warnings
+    promise), with the way-back bookkeeping pointing at the new channel."""
+    import asyncio
+
+    from aiogram import Dispatcher
+
+    from oflux_bot import handlers
+    from oflux_bot.alerts import CarrierMonitor
+    from oflux_bot.config import BotUsers
+
+    moves, retired = [], []
+    monkeypatch.setattr(
+        handlers, "migrate_user_channel",
+        lambda cfg, bu, old, target:
+            moves.append((old, target)) or {"channel": "chan-2", "link": "openflux://v1/z"},
+    )
+    monkeypatch.setattr(handlers, "retire_channel", lambda cfg, ch: retired.append(ch))
+    monkeypatch.setattr(
+        handlers, "load_registry",
+        lambda cfg: {"chan-1": {"carrier": "cups", "cups_url": "x", "rotated": None}},
+    )
+
+    bot_users = BotUsers(tmp_path / "bot_users.json")
+    bot_users.bind_channel(9, "chan-1")
+    monitor = CarrierMonitor(tmp_path / "carrier-state.json")
+    for t in (1, 2, 3):
+        monitor.feed("cups", False, now=t)
+
+    dp = Dispatcher()
+    handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users, carrier_monitor=monitor)
+    confirm = _confirm_handler(dp)
+
+    q = _FakeQuery()
+    asyncio.run(confirm(q))
+
+    assert moves == [("chan-1", "telemost")]  # the move, not a plain rotate
+    assert retired == ["chan-1"]
+    assert monitor.moved_channels("cups") == ["chan-2"]  # the NEW channel recorded

@@ -17,7 +17,6 @@ from oflux_admin.config import UserRegistry
 from .alerts import CHECK_INTERVAL_S, CarrierMonitor, Watchdog
 from .config import BotConfig, BotUsers, load_bot_config
 from .handlers import register_handlers, set_command_menu
-from .ops import migrate_user_channel, retire_channel, undo_migration
 
 
 def _log() -> logging.Logger:
@@ -51,9 +50,6 @@ async def _watchdog_loop(cfg: BotConfig, bot: Bot, bot_users: BotUsers, carrier:
         send,
         notify_user=notify_user,
         carrier_monitor=carrier,
-        migrate=lambda old, target: migrate_user_channel(cfg, bot_users, old, target),
-        retire=lambda channel: retire_channel(cfg, channel),
-        undo=lambda new, old: undo_migration(cfg, bot_users, new, old),
     )
     while True:
         try:

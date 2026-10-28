@@ -9,25 +9,28 @@ Probes (all local to the bot's VPS):
   - registry backup stamp touched by the admin machine's daily pull.
 
 Carrier verdicts (R1/R2): a carrier is "failed" after K bad cycles and
-"recovered" after M good ones. Failed → the bot migrates every affected
-user to the spare carrier (fresh link in the same message, old channel
-retired) and offers the way back once it recovers. A channel that dies
-alone while its carrier serves others (e.g. an expired telemost
-conference) is reissued in place, at most once per hour.
+"recovered" after M good ones. The watchdog NEVER re-issues links by
+itself (admin decision 2026-10-28: an automated mint loop is worse than
+a warning) — on failure it warns each affected user once per episode
+("do /rotate, you'll get a link on the spare carrier") and alerts the
+admin. A channel that dies alone on a healthy carrier (expired room or
+conference) gets the same warning, once per episode.
 
-Anti-flap: alerts after K consecutive failures, clears after M
-consecutive successes. A mass failure (>= 50% down) collapses into ONE
-aggregated alert. Repeat alerts per type cool down for cooldown seconds.
-Death of the VPS itself alerts nobody (bot is on it).
+Flap dampening: the third failure episode within an hour marks the
+carrier "unstable" — verdict alerts go quiet and recovery requires
+M * 4 good cycles, so a flapping carrier cannot spam anyone.
 
-send/notify_user(text) -> bool: an undelivered message must not consume
-its state transition — the watchdog rolls back and retries the next
-cycle, so a Telegram outage delays actions instead of swallowing them.
+Anti-flap baseline: alerts after K consecutive failures, clears after
+M consecutive successes. A mass failure (>= 50% down) collapses into
+ONE aggregated alert. Death of the VPS itself alerts nobody (bot is on
+it). send/notify_user(text) -> bool: an undelivered message must not
+consume its state transition — the watchdog rolls back and retries the
+next cycle, so a Telegram outage delays alerts instead of swallowing
+them.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import socket
@@ -43,14 +46,16 @@ K_FAILS = 3
 M_OKS = 2
 CHECK_INTERVAL_S = int(os.environ.get("OFLUX_CHECK_INTERVAL_S", "300"))
 BACKUP_MAX_AGE_S = 36 * 3600  # daily cron on the admin machine + slack
-REISSUE_CAP_S = 3600  # at most one auto-reissue per channel per hour
-MIGRATE_RETRY_S = 900  # a failed hand-over pass backs off before re-minting
+
+FLAP_WINDOW_S = 3600
+FLAP_UNSTABLE_AFTER = 3  # failure episodes within the window -> unstable
+UNSTABLE_M_FACTOR = 4  # recovery from unstable needs M * this many oks
 
 CARRIER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 )
-SPARE = {"cups": "telemost", "telemost": "cups"}
+SPARE = {"cups": "telemost", "telemost": "cups"}  # the failover pair
 
 _BACK_TEXT = (
     "🟢 Основной носитель снова работает. Хочешь вернуться на него — "
@@ -111,36 +116,22 @@ def probe_backup(config_dir, now: float | None = None) -> bool:
     return (time.time() if now is None else now) - mtime <= BACKUP_MAX_AGE_S
 
 
-def _qr_png(link: str) -> bytes:
-    import io
-
-    import qrcode
-
-    buf = io.BytesIO()
-    qrcode.make(link).save(buf, format="PNG")
-    return buf.getvalue()
-
-
 def _iso(now: float) -> str:
     return datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
 
 
-def _link_footer(link: str) -> str:
-    return f"{link}\n\n(ссылка = ключ: не публикуй, храни как пароль)"
-
-
-def _move_text(spare: str, link: str) -> str:
+def _carrier_warning_text() -> str:
     return (
-        "⚠️ Носитель, на котором работал твой канал, недоступен у всех. "
-        f"Держи новую ссылку — она уже на запасном носителе ({spare}). "
-        "Импортируй её в приложении вместо старой:\n\n" + _link_footer(link)
+        "⚠️ Носитель, на котором работает твой канал, недоступен у всех. "
+        "Сделай /rotate — бот выдаст свежую ссылку на рабочем носителе "
+        "(старая при этом перестанет работать)."
     )
 
 
-def _reissue_text(link: str) -> str:
+def _channel_warning_text() -> str:
     return (
         "⚠️ Твой канал перестал работать (сам носитель жив — ты просто попал "
-        "на дохлую комнату/конференцию). Держи свежую ссылку:\n\n" + _link_footer(link)
+        "на дохлую комнату/конференцию). Сделай /rotate — дам свежую ссылку."
     )
 
 
@@ -189,9 +180,15 @@ class CarrierMonitor:
     """Carrier verdicts with the channel-grade anti-flap: 'failed' after K
     bad cycles, 'recovered' after M good ones (feed()).
 
-    The failed/moved bookkeeping persists (carrier-state.json) so migration
-    decisions and the way-back offer survive restarts; the K/M counters are
-    in-memory and simply recount after one."""
+    The failed/moved bookkeeping persists (carrier-state.json) so warnings
+    and the way-back offer survive restarts; the K/M counters are in-memory
+    and simply recount after one.
+
+    Flap dampening: the third failure episode within FLAP_WINDOW_S marks
+    the carrier "unstable" — feed() returns 'unstable' instead of 'failed'
+    (callers go quiet), and recovery needs M * UNSTABLE_M_FACTOR oks; the
+    verdict is then 'recovered_stable'. While unstable, failed() stays
+    True: user-initiated moves stay available, automated noise does not."""
 
     def __init__(self, state_path, k_fails: int = K_FAILS, m_oks: int = M_OKS) -> None:
         self.path = Path(state_path)
@@ -213,32 +210,45 @@ class CarrierMonitor:
         self.path.chmod(0o600)
 
     def _entry(self, carrier: str) -> dict:
-        return self._state.setdefault(carrier, {"failed": False, "recovered": False, "moved": []})
+        return self._state.setdefault(
+            carrier, {"failed": False, "recovered": False, "moved": [], "episodes": []}
+        )
 
     def feed(self, carrier: str, ok: bool, now: float | None = None) -> str | None:
-        """Feed one carrier health result; returns 'failed' | 'recovered' | None."""
+        """Feed one carrier health result; returns 'failed' | 'unstable' |
+        'recovered' | 'recovered_stable' | None."""
         now = time.time() if now is None else now
         entry = self._entry(carrier)
         if ok:
             self._fails[carrier] = 0
             if not entry["failed"]:
                 return None
+            need = self.m * (UNSTABLE_M_FACTOR if entry.get("unstable") else 1)
             self._oks[carrier] = self._oks.get(carrier, 0) + 1
-            if self._oks[carrier] >= self.m:
+            if self._oks[carrier] >= need:
+                was_unstable = entry.get("unstable")
                 entry["failed"] = False
                 entry["recovered"] = True
                 entry["recovered_at"] = _iso(now)
+                entry["unstable"] = False
+                if was_unstable:
+                    entry["episodes"] = []  # proven stable: the flap window resets
                 self._save()
-                return "recovered"
+                return "recovered_stable" if was_unstable else "recovered"
             return None
         self._oks[carrier] = 0
         self._fails[carrier] = self._fails.get(carrier, 0) + 1
         if self._fails[carrier] >= self.k and not entry["failed"]:
+            window = [t for t in entry.get("episodes", []) if now - t < FLAP_WINDOW_S]
+            window.append(now)
+            entry["episodes"] = window
             entry["failed"] = True
             entry["recovered"] = False
             entry["since"] = _iso(now)
+            if len(window) >= FLAP_UNSTABLE_AFTER:
+                entry["unstable"] = True
             self._save()
-            return "failed"
+            return "unstable" if entry.get("unstable") else "failed"
         return None
 
     def failed(self, carrier: str) -> bool:
@@ -271,18 +281,12 @@ class CarrierMonitor:
         self._save()
 
 
-def _newest_per_tg(channels: dict) -> dict[int, str]:
-    """Newest active channel per owner: a user mid-handover may still show
-    the dead predecessor; only the newest one may migrate/reissue."""
-    newest: dict[int, str] = {}
-    for channel, user in channels.items():
-        tg = user.get("tg_id")
-        if tg is None:
-            continue
-        cur = newest.get(tg)
-        if cur is None or str(user.get("created", "")) > str(channels[cur].get("created", "")):
-            newest[tg] = channel
-    return newest
+def _kind_of(user: dict) -> str | None:
+    if user.get("telemost_url") or user.get("carrier") == "telemost":
+        return "telemost"
+    if user.get("cups_url") or user.get("carrier") == "cups":
+        return "cups"
+    return None
 
 
 class Watchdog:
@@ -293,28 +297,19 @@ class Watchdog:
         send,
         notify_user=None,
         carrier_monitor: CarrierMonitor | None = None,
-        migrate=None,
-        retire=None,
-        undo=None,
     ) -> None:
         # registry_source: callable returning a FRESH UserRegistry — the
         # registry file changes between cycles (bot-issued channels), a
         # startup snapshot would probe ghosts and miss new channels.
-        # send(text) -> bool: False = not delivered, roll back and retry.
-        # notify_user(tg_id, text, png|None) -> bool and the migrate/retire/
-        # undo ops enable the carrier-failure hand-over (R3); without them
-        # the watchdog still probes and alerts, it just never migrates.
+        # send/notify_user(text) -> bool: False = not delivered, roll back
+        # and retry. The watchdog only probes and WARNS — link re-issuance
+        # is always user-initiated (/rotate, /issue).
         self.cfg = cfg
         self.registry_source = registry_source
         self.send = send
         self.notify_user = notify_user
         self.carrier = carrier_monitor
-        self.migrate = migrate
-        self.retire = retire
-        self.undo = undo
         self.state = AlertState()
-        self._reissued_at: dict[str, float] = {}
-        self._migrate_attempted_at: dict[str, float] = {}
 
     async def run_once(self) -> None:
         channels = self.registry_source().active()
@@ -346,38 +341,29 @@ class Watchdog:
                 carrier_healthy[kind] = carrier_healthy.get(kind, False) or healthy
             results.append((channel, user, kind, unit_ok, healthy))
 
-        # carrier verdicts (R1/R2) and the hand-over (R3)
+        # carrier verdicts (R1/R2): warn, never mint
         if self.carrier is not None:
             for kind in sorted(carrier_healthy):
                 verdict = self.carrier.feed(kind, carrier_healthy[kind])
                 if verdict == "failed":
                     await self.send(
                         f"🚨 носитель {kind} признан нерабочим ({self.carrier.k} проверок подряд) — "
-                        f"перевожу пользователей на {SPARE[kind]}"
+                        "пользователям отправлено предупреждение"
                     )
-                elif verdict == "recovered":
-                    await self.send(f"🟢 носитель {kind} восстановился")
+                    await self._warn_users(kind)
+                elif verdict == "unstable":
+                    await self.send(
+                        f"🎚 носитель {kind} нестабилен ({FLAP_UNSTABLE_AFTER} срывов за час) — "
+                        "молчу, пока не стабилизируется"
+                    )
+                elif verdict in ("recovered", "recovered_stable"):
+                    tail = " (после нестабильности)" if verdict == "recovered_stable" else ""
+                    await self.send(f"🟢 носитель {kind} восстановился{tail}")
                     await self._offer_return(kind)
-            # (re)run the hand-over for every carrier still marked failed;
-            # migrated users drop out because their channel now sits on the
-            # spare. A failed pass (e.g. Telegram down at delivery time)
-            # backs off: retrying immediately would mint a fresh conference
-            # every cycle for nothing.
-            if self.migrate is not None:
-                now = time.time()
-                for kind in self.carrier.failed_carriers():
-                    if now - self._migrate_attempted_at.get(kind, 0.0) < MIGRATE_RETRY_S:
-                        continue
-                    self._migrate_attempted_at[kind] = now
-                    targets = {c: u for c, u in channels.items() if _kind_of(u) == kind}
-                    if targets:
-                        await self._migrate_carrier(kind, SPARE[kind], targets)
 
-        # per-channel alerts + the single-channel reissue (expired room or
-        # conference while the carrier itself serves everyone else fine)
-        now = time.time()
+        # per-channel alerts + a warning for a channel that died alone on a
+        # healthy carrier (expired room/conference) — once per episode
         pending: list[tuple[str, str, str]] = []  # (kind, state_key, text)
-        newest = _newest_per_tg(channels)
         down = 0
         for channel, user, kind, unit_ok, healthy in results:
             down += 0 if healthy else 1
@@ -389,18 +375,14 @@ class Watchdog:
                     text = f"🔴 канал {channel} недоступен (носитель {kind})"
                 if (
                     self.carrier is not None
-                    and self.migrate is not None
+                    and self.notify_user is not None
                     and kind
                     and unit_ok
                     and carrier_healthy.get(kind)
                     and user.get("tg_id")
-                    and newest.get(user["tg_id"]) == channel
                 ):
-                    if now - self._reissued_at.get(channel, 0.0) >= REISSUE_CAP_S:
-                        self._reissued_at[channel] = now
-                        await self._reissue(channel, user["tg_id"], kind)
-                        continue
-                    text += " — авто-перевыписка за час уже была, разберись руками"
+                    await self.notify_user(user["tg_id"], _channel_warning_text())
+                    continue
                 pending.append(("alert", f"channel:{channel}", text))
             elif action == "clear":
                 pending.append(("clear", f"channel:{channel}", f"🟢 канал {channel} восстановился"))
@@ -460,62 +442,19 @@ class Watchdog:
             if not await self.send("🟢 бэкап реестра снова свежий"):
                 self.state.active["backup"] = True
 
-    async def _migrate_carrier(self, kind: str, spare: str, targets: dict) -> None:
-        """Move every owned channel of a dead carrier to the spare (R3);
-        stale predecessors of already-moved users are just retired."""
-        assert self.carrier is not None and self.migrate and self.retire and self.undo
-        newest = _newest_per_tg(targets)
-        moved, errors, notes = 0, 0, []
-        for channel, user in sorted(targets.items()):
-            tg = user.get("tg_id")
-            if tg is None:
-                continue  # ownerless (drill) channel: the 🔴 alert is its voice
-            if newest.get(tg) != channel:
-                try:
-                    await asyncio.to_thread(self.retire, channel)
-                except Exception as exc:  # noqa: BLE001
-                    notes.append(f"{channel}: уборка старого не вышла: {str(exc)[:60]}")
-                continue
-            try:
-                result = await asyncio.to_thread(self.migrate, channel, spare)
-            except Exception as exc:  # noqa: BLE001
-                errors += 1
-                notes.append(f"{channel}: {str(exc)[:80]}")
-                continue
-            if not await self.notify_user(tg, _move_text(spare, result["link"]), _qr_png(result["link"])):
-                errors += 1
-                notes.append(f"{channel}: ссылка не доставлена, откатываю")
-                try:
-                    await asyncio.to_thread(self.undo, result["channel"], channel)
-                except Exception as exc:  # noqa: BLE001
-                    notes.append(f"{channel}: откат не вышел: {str(exc)[:60]}")
-                continue
-            self.carrier.record_moved(kind, channel)
-            moved += 1
-        if moved or notes:
-            text = f"носитель {kind}: переездов на {spare}: {moved}"
-            if errors:
-                text += f", ошибок: {errors} (повтор в следующем цикле)"
-            for note in notes[:5]:
-                text += f"\n- {note}"
-            await self.send(text)
-
-    async def _reissue(self, channel: str, tg_id: int, kind: str) -> None:
-        """Fresh rooms/conference on the SAME carrier for one dead channel."""
-        assert self.migrate and self.retire and self.undo
-        try:
-            result = await asyncio.to_thread(self.migrate, channel, kind)
-        except Exception as exc:  # noqa: BLE001
-            await self.send(f"🔴 канал {channel}: авто-перевыписка не вышла: {str(exc)[:80]}")
+    async def _warn_users(self, kind: str) -> None:
+        """One warning per failure episode to every user sitting on a dead
+        carrier (admin decision 2026-10-28: warn, don't auto-move)."""
+        if self.notify_user is None:
             return
-        if await self.notify_user(tg_id, _reissue_text(result["link"]), _qr_png(result["link"])):
-            await asyncio.to_thread(self.retire, channel)
-        else:
-            await self.send(f"🔴 канал {channel}: свежая ссылка не доставлена, откатываю")
-            try:
-                await asyncio.to_thread(self.undo, result["channel"], channel)
-            except Exception as exc:  # noqa: BLE001
-                await self.send(f"🔴 канал {channel}: откат не вышел: {str(exc)[:60]}")
+        channels = self.registry_source().active()
+        tgs = {
+            u["tg_id"]
+            for u in channels.values()
+            if _kind_of(u) == kind and u.get("tg_id")
+        }
+        for tg in sorted(tgs):
+            await self.notify_user(tg, _carrier_warning_text())
 
     async def _offer_return(self, kind: str) -> None:
         """R4: everyone moved off a recovered carrier may move back — by
@@ -527,11 +466,3 @@ class Watchdog:
             user = active.get(channel)
             if user and user.get("tg_id"):
                 await self.notify_user(user["tg_id"], _BACK_TEXT)
-
-
-def _kind_of(user: dict) -> str | None:
-    if user.get("telemost_url") or user.get("carrier") == "telemost":
-        return "telemost"
-    if user.get("cups_url") or user.get("carrier") == "cups":
-        return "cups"
-    return None

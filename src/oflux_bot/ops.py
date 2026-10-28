@@ -138,6 +138,7 @@ def _fresh_channel(
     carrier_kind: str,
     rooms: str | None,
     telemost_url: str | None,
+    mark_rotated: bool = False,
 ) -> dict:
     """Allocate a name and port, apply the node, finalize the carrier,
     make + re-parse the link, register the channel. Raises on any step."""
@@ -146,8 +147,17 @@ def _fresh_channel(
     while registry.get(channel):
         channel = channel_for(f"{base}-{secrets.token_hex(2)}")
     key = secrets.token_hex(32)
-    port = registry.alloc_port(server)
     ops = LocalOps()
+    port = registry.alloc_port(server)
+    # alloc_port only sees the registry: a unit left running outside it
+    # (a crashed hand-over) would collide here and fail the installer
+    for _ in range(10):
+        _, out, _ = ops.run("ss -tln | grep -q ':%s ' && echo busy || echo free" % port)
+        if "free" in out:
+            break
+        port += 1
+    else:
+        raise RuntimeError("нет свободного порта в диапазоне сервера")
     prov = Provisioner(ops, cfg.admin.settings.installer)
     prov.sync_installer()
     prov.probe()
@@ -185,6 +195,7 @@ def _fresh_channel(
         link=link,
         tg_id=tg_id,
         created=_now(),
+        rotated=_now() if mark_rotated else None,
     )
     return {"channel": channel, "port": int(result.get("port", port)), "link": link}
 
@@ -278,6 +289,7 @@ def migrate_user_channel(
     result = _fresh_channel(
         cfg, registry, base, tg_id,
         carrier_kind=target_carrier, rooms=rooms, telemost_url=telemost_url,
+        mark_rotated=True,  # counts toward the rotate/move cooldown
     )
     if tg_id:
         bot_users.bind_channel(tg_id, result["channel"])

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import io
+import time
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
@@ -222,20 +224,38 @@ class _MsgAsUser:
         return getattr(self._message, name)
 
 
+ROTATE_COOLDOWN_S = 600  # a channel may change (rotate/move) once per 10 min
+
+
+def _cooldown_left(user: dict, now: float | None = None) -> int:
+    """Seconds until this channel may change again (rotate or move): minting
+    a link is the scarce, spam-prone operation — one per ROTATE_COOLDOWN_S.
+    Fresh channels (never rotated) are cooldown-free."""
+    ts = str(user.get("rotated") or "")
+    if not ts:
+        return 0
+    try:
+        changed = datetime.fromisoformat(ts).timestamp()
+    except ValueError:
+        return 0
+    now = time.time() if now is None else now
+    return max(0, int(ROTATE_COOLDOWN_S - (now - changed)))
+
+
 def migration_target(cfg: BotConfig, carrier_monitor, bot_users: BotUsers, tg_id: int):
-    """(target_carrier, old_channel, back_to|None) when /issue should MOVE
-    this user instead of refusing: their carrier is failed, or they sit on
-    the spare of a recovered carrier and may move back (R4)."""
+    """(target_carrier, old_channel, back_to|None, from_kind|None) when
+    /issue should MOVE this user instead of refusing: their carrier is
+    failed, or they sit on the spare of a recovered carrier (R4)."""
     channel = bot_users.channel_of(tg_id)
     if not channel:
         return None
     user = load_registry(cfg).get(channel) or {}
     kind = carrier_of(user)
     if kind and carrier_monitor.failed(kind):
-        return SPARE[kind], channel, None
+        return SPARE[kind], channel, None, kind
     for carrier in carrier_monitor.recovered_carriers():
         if channel in carrier_monitor.moved_channels(carrier):
-            return carrier, channel, carrier
+            return carrier, channel, carrier, kind
     return None
 
 
@@ -252,6 +272,19 @@ def register_handlers(
         # no interaction may leave buttons on the bottom panel
         kwargs.setdefault("reply_markup", ReplyKeyboardRemove())
         return message.answer(text, **kwargs)
+
+    async def _move_user(old_channel: str, from_kind: str | None, target: str, back_to: str | None = None) -> dict:
+        """Fresh channel on the target carrier, old channel retired, the
+        way-back bookkeeping kept in sync (R3/R4): moved[] stores the NEW
+        channel — the old one is revoked and would never be found again."""
+        result = await asyncio.to_thread(migrate_user_channel, cfg, bot_users, old_channel, target)
+        await asyncio.to_thread(retire_channel, cfg, old_channel)
+        if carrier_monitor is not None:
+            if back_to:
+                carrier_monitor.drop_moved(back_to, result["channel"])
+            if from_kind:
+                carrier_monitor.record_moved(from_kind, result["channel"])
+        return result
 
     async def _do_issue(message: Message) -> None:
         tg_id = message.from_user.id
@@ -272,27 +305,31 @@ def register_handlers(
                         reply_markup=_menu_kb(True),
                     )
                     return
-                target, old_channel, back_to = move
-                note = f"готов ({target}" + (", возврат на основной)" if back_to else ", запасной)")
+                target, old_channel, back_to, from_kind = move
+                left = _cooldown_left(load_registry(cfg).get(old_channel) or {})
+                if left > 0:
+                    await clean(
+                        message,
+                        f"Канал менялся меньше {ROTATE_COOLDOWN_S // 60} минут назад — "
+                        f"подожди ещё {left // 60 + 1} мин.",
+                        reply_markup=_menu_kb(True),
+                    )
+                    return
                 # plain message on purpose: a message sent with ReplyKeyboardRemove
                 # can never be edited by the bot (Telegram rejects editMessageText)
                 msg = await message.answer(f"Переезжаю: новый канал на носителе {target}...")
                 try:
-                    result = await asyncio.to_thread(
-                        migrate_user_channel, cfg, bot_users, old_channel, target
-                    )
+                    result = await _move_user(old_channel, from_kind, target, back_to)
                 except Exception as exc:  # noqa: BLE001 - user-facing error text
                     await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
                     await clean(message, "Что дальше?", reply_markup=_menu_kb(True))
                     return
+                note = f"готов ({target}" + (", возврат на основной)" if back_to else ", запасной)")
                 await msg.edit_text(_link_message(result["channel"], result["link"], note))
                 await message.answer_photo(
                     qr_photo(result["link"]), caption="QR для приложения",
                     reply_markup=ReplyKeyboardRemove(),
                 )
-                await asyncio.to_thread(retire_channel, cfg, old_channel)
-                if back_to:
-                    carrier_monitor.drop_moved(back_to, old_channel)
                 return
             # plain message on purpose: a message sent with ReplyKeyboardRemove
             # can never be edited by the bot (Telegram rejects editMessageText)
@@ -407,6 +444,34 @@ def register_handlers(
             await query.answer("Уже выполняется, подожди пару секунд", show_alert=True)
             return
         async with ops_lock:
+            user = load_registry(cfg).get(channel) or {}
+            left = _cooldown_left(user)
+            if left > 0:
+                await query.answer(
+                    f"Смена ключа не чаще раза в {ROTATE_COOLDOWN_S // 60} минут — "
+                    f"подожди ещё {left // 60 + 1} мин",
+                    show_alert=True,
+                )
+                return
+            kind = carrier_of(user)
+            if carrier_monitor is not None and kind and carrier_monitor.failed(kind):
+                # dead carrier: rotating means the move to the spare carrier
+                target = SPARE[kind]
+                await query.answer("Переезжаю...")
+                await _drop_confirm_buttons(query)
+                try:
+                    result = await _move_user(channel, kind, target)
+                except Exception as exc:  # noqa: BLE001
+                    await query.message.edit_text(f"Не получилось: {str(exc)[:200]}")
+                    return
+                await query.message.edit_text(
+                    _link_message(result["channel"], result["link"], f"готов (переезд на {target})")
+                )
+                await query.message.answer_photo(
+                    qr_photo(result["link"]), caption="новый QR",
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+                return
             await query.answer("Меняю ключ...")
             await _drop_confirm_buttons(query)
             try:
