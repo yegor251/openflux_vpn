@@ -206,16 +206,18 @@ def issue_channel(
     tg_id: int,
     name_base: str | None = None,
     *,
-    telemost_url: str | None = None,
+    carrier: str | None = None,
 ) -> dict:
     """Full self-service issuance for one TG user. Raises on any step.
 
     Carrier-product channels (admin decision 2026-10-25, memory
     carrier-only-product): the link and the node carry the carrier only —
-    no Yandex doc, no cookies, and the client never dials the VDS. The
-    default carrier is cupsonline (a room set from the pool);
-    ``telemost_url`` switches the channel to a Telemost conference
-    created by the admin."""
+    no Yandex doc, no cookies, and the client never dials the VDS.
+
+    ``carrier`` ("cups"/"telemost") is the user's explicit choice: it is
+    honored with NO silent fallback (a refused cups means a loud error,
+    not a surprise telemost). carrier=None keeps the legacy default chain:
+    cups from the pool -> minted -> telemost fallback."""
     if bot_users.channel_of(tg_id):
         raise RuntimeError("у пользователя уже есть канал")
     registry = _registry(cfg)
@@ -224,11 +226,22 @@ def issue_channel(
     if registry.active_count(server.name) >= server.max_channels:
         raise RuntimeError("сервер переполнен, попробуйте позже")
 
-    carrier_kind = "cups" if not telemost_url else "telemost"
-    rooms = None
-    if not telemost_url:
-        # carrier 1: cups — a set from the pool, or minted right here (cups
-        # rate-limits creation after volume; when it refuses, fall through)
+    rooms = telemost_url = None
+    if carrier == "telemost":
+        carrier_kind = "telemost"
+        telemost_url = _telemost_url(cfg)
+    elif carrier == "cups":
+        carrier_kind = "cups"
+        try:
+            rooms = _pop_room_set(cfg)
+        except RuntimeError:
+            rooms = None
+        if rooms is None:
+            # CupsRoomError propagates: the user asked for cups, no fallback
+            rooms = pack_rooms(create_rooms())
+    else:
+        # default chain: cups from the pool, or minted, or telemost fallback
+        carrier_kind = "cups"
         try:
             rooms = _pop_room_set(cfg)
         except RuntimeError:
@@ -240,9 +253,6 @@ def issue_channel(
             except CupsRoomError:
                 rooms = None
         if rooms is None:
-            # carrier 2: a fresh Telemost conference, created from the admin
-            # session file; lives ~24 h without activity and extends while
-            # the channel is in use
             carrier_kind = "telemost"
             telemost_url = _telemost_url(cfg)
 

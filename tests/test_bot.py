@@ -312,9 +312,88 @@ def test_carrier_flap_dampening(tmp_path):
     assert not m.failed("cups")
 
 
-# -- /issue as the move (R3/R4 user-facing path) ------------------------------
+# -- /issue: carrier choice + switch (admin decision 2026-10-29) --------------
 
-def test_issue_moves_user_when_carrier_failed(tmp_path, monkeypatch):
+class _Sent:
+    def __init__(self, text=None):
+        self.text = text
+
+    async def edit_text(self, text, **kw):
+        self.edited = text
+
+
+class _Msg:
+    def __init__(self, user_id=555):
+        self.from_user = type("U", (), {"id": user_id})()
+        self.answers = []
+
+    async def answer(self, text=None, **kw):
+        sent = _Sent(text)
+        self.answers.append((sent, kw))
+        return sent
+
+    async def answer_photo(self, *a, **kw):
+        self.answers.append((_Sent(), {"photo": True}))
+
+
+class _Tap:
+    def __init__(self, data, user_id=555):
+        self.data = data
+        self.from_user = type("U", (), {"id": user_id})()
+        self.message = _Msg(user_id)
+        self.answers = []
+        self.alerts = []
+
+    async def answer(self, text=None, show_alert=False):
+        (self.alerts if show_alert else self.answers).append(text)
+
+
+def _handlers(dp, names):
+    out = {}
+    for h in dp.message.handlers + dp.callback_query.handlers:
+        n = getattr(h.callback, "__name__", "")
+        if n in names:
+            out[n] = h.callback
+    return out
+
+
+def test_issue_lets_user_pick_the_carrier(tmp_path, monkeypatch):
+    """Fresh /issue asks for the carrier and honors the explicit choice."""
+    import asyncio
+
+    from aiogram import Dispatcher
+
+    from oflux_bot import handlers
+    from oflux_bot.config import BotUsers
+
+    calls = []
+    monkeypatch.setattr(
+        handlers, "issue_channel",
+        lambda cfg, bu, tg, base=None, carrier=None:
+            calls.append(carrier) or {"channel": "chan-x", "link": "openflux://v1/x"},
+    )
+    bot_users = BotUsers(tmp_path / "bot_users.json")
+
+    dp = Dispatcher()
+    handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users)
+    h = _handlers(dp, {"issue", "issue_via_carrier"})
+
+    msg = _Msg()
+    asyncio.run(h["issue"](msg))
+    assert "Выбери транспорт" in msg.answers[0][0].text
+    kb = msg.answers[0][1]["reply_markup"]
+    assert [b.callback_data for row in kb.inline_keyboard for b in row] == ["iss:cups", "iss:telemost"]
+
+    q = _Tap("iss:telemost")
+    asyncio.run(h["issue_via_carrier"](q))
+    assert calls == ["telemost"]  # the explicit choice, no fallback
+    progress = q.message.answers[0][0]
+    assert progress.edited.startswith("Канал chan-x") and "telemost" in progress.edited
+
+
+def test_issue_on_failed_carrier_offers_switch(tmp_path, monkeypatch):
+    """cups is failed: the menu hides it; tapping the spare performs the
+    move (old channel retired, way-back bookkeeping points at the new)."""
     import asyncio
 
     from aiogram import Dispatcher
@@ -323,18 +402,15 @@ def test_issue_moves_user_when_carrier_failed(tmp_path, monkeypatch):
     from oflux_bot.alerts import CarrierMonitor
     from oflux_bot.config import BotUsers
 
-    class FakeRegistry:
-        def get(self, ch):
-            return {"carrier": "cups", "cups_url": "x"} if ch == "chan-1" else None
-
-    calls = []
-    monkeypatch.setattr(handlers, "load_registry", lambda cfg: FakeRegistry())
+    moves, retired = [], []
+    monkeypatch.setattr(handlers, "load_registry",
+                        lambda cfg: {"chan-1": {"carrier": "cups", "cups_url": "x", "rotated": None}})
     monkeypatch.setattr(
         handlers, "migrate_user_channel",
         lambda cfg, bu, old, target:
-            calls.append((old, target)) or {"channel": "chan-2", "link": "openflux://v1/z"},
+            moves.append((old, target)) or {"channel": "chan-2", "link": "openflux://v1/z"},
     )
-    monkeypatch.setattr(handlers, "retire_channel", lambda cfg, ch: calls.append(("retire", ch)))
+    monkeypatch.setattr(handlers, "retire_channel", lambda cfg, ch: retired.append(ch))
 
     bot_users = BotUsers(tmp_path / "bot_users.json")
     bot_users.bind_channel(7, "chan-1")
@@ -344,88 +420,51 @@ def test_issue_moves_user_when_carrier_failed(tmp_path, monkeypatch):
 
     dp = Dispatcher()
     handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users, carrier_monitor=monitor)
-    issue = next(
-        h.callback for h in dp.message.handlers
-        if getattr(h.callback, "__name__", "") == "issue"
-    )
+    h = _handlers(dp, {"issue", "switch_via_carrier"})
 
-    class FakeSent:
-        async def edit_text(self, text, **kw):
-            self.edited = text
+    msg = _Msg(7)
+    asyncio.run(h["issue"](msg))
+    kb = msg.answers[0][1]["reply_markup"]
+    assert [b.callback_data for row in kb.inline_keyboard for b in row] == ["sw:telemost"]
+    assert "старый канал" in msg.answers[0][0].text
 
-    class FakeMessage:
-        def __init__(self):
-            self.from_user = type("U", (), {"id": 7})()
-            self.answers = []
-
-        async def answer(self, text=None, **kw):
-            sent = FakeSent()
-            sent.text = text
-            self.answers.append((sent, kw))
-            return sent
-
-        async def answer_photo(self, *a, **kw):
-            self.answers.append((FakeSent(), {"photo": True}))
-
-    msg = FakeMessage()
-    asyncio.run(issue(msg))
-
-    assert ("chan-1", "telemost") in calls and ("retire", "chan-1") in calls
-    assert "chan-2" in msg.answers[0][0].edited  # the new link was delivered
+    q = _Tap("sw:telemost", user_id=7)
+    asyncio.run(h["switch_via_carrier"](q))
+    assert moves == [("chan-1", "telemost")] and retired == ["chan-1"]
+    assert monitor.moved_channels("cups") == ["chan-2"]  # the NEW channel recorded
 
 
-def test_issue_still_refuses_without_carrier_problem(tmp_path, monkeypatch):
+def test_issue_with_channel_offers_switch_to_any_carrier(tmp_path, monkeypatch):
+    """Nothing failed: /issue with a channel offers both carriers, the
+    current one labeled, and does NOT touch anything until a tap."""
     import asyncio
 
     from aiogram import Dispatcher
 
     from oflux_bot import handlers
-    from oflux_bot.alerts import CarrierMonitor
     from oflux_bot.config import BotUsers
 
-    class FakeRegistry:
-        def get(self, ch):
-            return {"carrier": "telemost", "telemost_url": "https://x"} if ch == "chan-1" else None
-
-    monkeypatch.setattr(handlers, "load_registry", lambda cfg: FakeRegistry())
+    monkeypatch.setattr(handlers, "load_registry",
+                        lambda cfg: {"chan-1": {"carrier": "telemost", "telemost_url": "https://x", "rotated": None}})
     monkeypatch.setattr(
         handlers, "migrate_user_channel",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not migrate")),
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not move without a tap")),
     )
 
     bot_users = BotUsers(tmp_path / "bot_users.json")
     bot_users.bind_channel(7, "chan-1")
-    monitor = CarrierMonitor(tmp_path / "carrier-state.json")
 
     dp = Dispatcher()
-    handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users, carrier_monitor=monitor)
-    issue = next(
-        h.callback for h in dp.message.handlers
-        if getattr(h.callback, "__name__", "") == "issue"
-    )
+    handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users)
+    h = _handlers(dp, {"issue"})
 
-    class FakeSent:
-        async def edit_text(self, text, **kw):
-            self.edited = text
-
-    class FakeMessage:
-        def __init__(self):
-            self.from_user = type("U", (), {"id": 7})()
-            self.answers = []
-
-        async def answer(self, text=None, **kw):
-            sent = FakeSent()
-            sent.text = text
-            self.answers.append((sent, kw))
-            return sent
-
-        async def answer_photo(self, *a, **kw):
-            self.answers.append((FakeSent(), {"photo": True}))
-
-    msg = FakeMessage()
-    asyncio.run(issue(msg))
-
-    assert msg.answers[0][0].text.startswith("У тебя уже есть канал")
+    msg = _Msg(7)
+    asyncio.run(h["issue"](msg))
+    kb = msg.answers[0][1]["reply_markup"]
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert cbs == ["sw:cups", "sw:telemost"]
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert any("текущий" in t for t in labels)  # telemost is labeled as current
 
 
 # -- link masking ------------------------------------------------------------
@@ -466,39 +505,22 @@ def test_issue_progress_message_sent_plain_and_editable(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         handlers, "issue_channel",
-        lambda cfg, bu, tg: {"channel": "chan-x", "link": "openflux://v1/x"},
+        lambda cfg, bu, tg, base=None, carrier=None:
+            {"channel": "chan-x", "link": "openflux://v1/x"},
     )
     bot_users = BotUsers(tmp_path / "bot_users.json")
 
     dp = Dispatcher()
     handlers.register_handlers(dp, bot=None, cfg=None, bot_users=bot_users)
-    issue = next(
-        h.callback for h in dp.message.handlers
-        if getattr(h.callback, "__name__", "") == "issue"
+    via_carrier = next(
+        h.callback for h in dp.callback_query.handlers
+        if getattr(h.callback, "__name__", "") == "issue_via_carrier"
     )
 
-    class FakeSent:
-        async def edit_text(self, text, **kw):
-            self.edited = text
+    q = _Tap("iss:cups")
+    asyncio.run(via_carrier(q))
 
-    class FakeMessage:
-        def __init__(self):
-            self.from_user = type("U", (), {"id": 555})()
-            self.answers = []
-
-        async def answer(self, text=None, **kw):
-            sent = FakeSent()
-            sent.text = text
-            self.answers.append((sent, kw))
-            return sent
-
-        async def answer_photo(self, *a, **kw):
-            self.answers.append((FakeSent(), {"photo": True}))
-
-    msg = FakeMessage()
-    asyncio.run(issue(msg))
-
-    progress_sent, progress_kw = msg.answers[0]
+    progress_sent, progress_kw = q.message.answers[0]
     assert "reply_markup" not in progress_kw  # plain, so edit_text works
     assert progress_sent.edited.startswith("Канал chan-x")
 

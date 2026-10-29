@@ -37,7 +37,7 @@ from .ops import (
 
 BOT_COMMANDS = [
     ("start", "Меню с кнопками"),
-    ("issue", "Выпустить мой VPN-канал (ссылка + QR)"),
+    ("issue", "Выпустить или сменить канал — с выбором транспорта"),
     ("my", "Показать мою ссылку и QR заново"),
     ("status", "Состояние моего канала"),
     ("rotate", "Новый ключ канала (старая ссылка умрёт)"),
@@ -48,14 +48,14 @@ BOT_COMMANDS = [
 
 HELP_TEXT = """Команды:
 /start — меню кнопками
-/issue — выпустить свой VPN-канал (ссылка + QR)
+/issue — выпустить канал (выбор транспорта) или сменить транспорт
 /my — показать мою ссылку и QR
 /rotate — новый ключ для канала (старая ссылка умрёт)
 /revoke — удалить мой канал
 /status — состояние моего канала
 /download — как поставить приложение (кнопки по платформам)
 
-Канал выдаётся каждому: просто напиши /issue.
+Канал выдаётся каждому: напиши /issue и выбери транспорт.
 """
 
 DL_INTRO = """Как поставить приложение — выбери платформу.
@@ -242,23 +242,6 @@ def _cooldown_left(user: dict, now: float | None = None) -> int:
     return max(0, int(ROTATE_COOLDOWN_S - (now - changed)))
 
 
-def migration_target(cfg: BotConfig, carrier_monitor, bot_users: BotUsers, tg_id: int):
-    """(target_carrier, old_channel, back_to|None, from_kind|None) when
-    /issue should MOVE this user instead of refusing: their carrier is
-    failed, or they sit on the spare of a recovered carrier (R4)."""
-    channel = bot_users.channel_of(tg_id)
-    if not channel:
-        return None
-    user = load_registry(cfg).get(channel) or {}
-    kind = carrier_of(user)
-    if kind and carrier_monitor.failed(kind):
-        return SPARE[kind], channel, None, kind
-    for carrier in carrier_monitor.recovered_carriers():
-        if channel in carrier_monitor.moved_channels(carrier):
-            return carrier, channel, carrier, kind
-    return None
-
-
 def register_handlers(
     dp: Dispatcher, bot: Bot, cfg: BotConfig, bot_users: BotUsers, carrier_monitor=None
 ) -> None:
@@ -272,6 +255,51 @@ def register_handlers(
         # no interaction may leave buttons on the bottom panel
         kwargs.setdefault("reply_markup", ReplyKeyboardRemove())
         return message.answer(text, **kwargs)
+
+    def _carrier_kb(prefix: str, current: str | None = None):
+        """Carrier choice for /issue: available carriers only (a failed one
+        is excluded — issuing onto a dead carrier helps nobody)."""
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        labels = {"cups": "🥤 cups", "telemost": "📹 telemost"}
+        failed = set(carrier_monitor.failed_carriers()) if carrier_monitor else set()
+        rows = []
+        for kind in ("cups", "telemost"):
+            if kind in failed:
+                continue
+            label = labels[kind] + (" (текущий)" if kind == current else "")
+            rows.append([InlineKeyboardButton(text=label, callback_data=f"{prefix}:{kind}")])
+        return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+    async def _show_issue_menu(message: Message) -> None:
+        channel = bot_users.channel_of(message.from_user.id)
+        if channel:
+            cur = carrier_of(load_registry(cfg).get(channel) or {})
+            kb = _carrier_kb("sw", current=cur)
+            if kb is None:
+                await clean(message, "Оба носителя сейчас лежат — попробуй позже.",
+                            reply_markup=_menu_kb(True))
+                return
+            await message.answer(
+                f"Твой канал — на носителе {cur}. Выбери транспорт: старый канал "
+                "удалится, новый будет на выбранном.",
+                reply_markup=kb,
+            )
+            return
+        kb = _carrier_kb("iss")
+        if kb is None:
+            await clean(message, "Оба носителя сейчас лежат — попробуй позже.",
+                        reply_markup=_menu_kb(False))
+            return
+        await message.answer("Выбери транспорт для нового канала:", reply_markup=kb)
+
+    async def _deliver_link(message, result: dict, kind: str, back_note: str = "") -> None:
+        await message.answer(_link_message(result["channel"], result["link"],
+                                           f"готов (носитель {kind}){back_note}"))
+        await message.answer_photo(
+            qr_photo(result["link"]), caption="QR для приложения",
+            reply_markup=ReplyKeyboardRemove(),
+        )
 
     async def _move_user(old_channel: str, from_kind: str | None, target: str, back_to: str | None = None) -> dict:
         """Fresh channel on the target carrier, old channel retired, the
@@ -287,62 +315,79 @@ def register_handlers(
         return result
 
     async def _do_issue(message: Message) -> None:
-        tg_id = message.from_user.id
+        # /issue never issues blindly: the user picks the carrier first
+        # (admin decision 2026-10-29); with a channel it becomes the switch
+        await _show_issue_menu(message)
+
+    @dp.callback_query(F.data.startswith("iss:"))
+    async def issue_via_carrier(query) -> None:
+        kind = query.data.split(":", 1)[1]
+        if kind not in ("cups", "telemost"):
+            await query.answer()
+            return
+        tg_id = query.from_user.id
         async with issue_lock:
-            channel = bot_users.channel_of(tg_id)  # re-check under the lock
-            if channel:
-                # a dead carrier (or a way-back offer) turns /issue into the
-                # move: a fresh channel on the other carrier, old one retired
-                move = (
-                    migration_target(cfg, carrier_monitor, bot_users, tg_id)
-                    if carrier_monitor
-                    else None
-                )
-                if move is None:
-                    await clean(
-                        message,
-                        "У тебя уже есть канал. Один канал на пользователя.",
-                        reply_markup=_menu_kb(True),
-                    )
-                    return
-                target, old_channel, back_to, from_kind = move
-                left = _cooldown_left(load_registry(cfg).get(old_channel) or {})
-                if left > 0:
-                    await clean(
-                        message,
-                        f"Канал менялся меньше {ROTATE_COOLDOWN_S // 60} минут назад — "
-                        f"подожди ещё {left // 60 + 1} мин.",
-                        reply_markup=_menu_kb(True),
-                    )
-                    return
-                # plain message on purpose: a message sent with ReplyKeyboardRemove
-                # can never be edited by the bot (Telegram rejects editMessageText)
-                msg = await message.answer(f"Переезжаю: новый канал на носителе {target}...")
-                try:
-                    result = await _move_user(old_channel, from_kind, target, back_to)
-                except Exception as exc:  # noqa: BLE001 - user-facing error text
-                    await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
-                    await clean(message, "Что дальше?", reply_markup=_menu_kb(True))
-                    return
-                note = f"готов ({target}" + (", возврат на основной)" if back_to else ", запасной)")
-                await msg.edit_text(_link_message(result["channel"], result["link"], note))
-                await message.answer_photo(
-                    qr_photo(result["link"]), caption="QR для приложения",
-                    reply_markup=ReplyKeyboardRemove(),
-                )
+            if bot_users.channel_of(tg_id):  # raced with another tap
+                await query.answer("Уже есть канал — /issue предложит смену", show_alert=True)
                 return
+            await query.answer("Создаю...")
             # plain message on purpose: a message sent with ReplyKeyboardRemove
             # can never be edited by the bot (Telegram rejects editMessageText)
-            msg = await message.answer("Создаю: канал на сервере...")
+            msg = await query.message.answer(f"Создаю: канал на носителе {kind}...")
             try:
                 # doc creation + provisioning block for tens of seconds
-                result = await asyncio.to_thread(issue_channel, cfg, bot_users, tg_id)
+                result = await asyncio.to_thread(issue_channel, cfg, bot_users, tg_id, None, carrier=kind)
             except Exception as exc:  # noqa: BLE001 - user-facing error text
                 await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
-                await clean(message, "Что дальше?", reply_markup=_menu_kb(False))
                 return
-        await msg.edit_text(_link_message(result["channel"], result["link"], "готов"))
-        await message.answer_photo(
+        await msg.edit_text(_link_message(result["channel"], result["link"], f"готов (носитель {kind})"))
+        await query.message.answer_photo(
+            qr_photo(result["link"]), caption="QR для приложения",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
+    @dp.callback_query(F.data.startswith("sw:"))
+    async def switch_via_carrier(query) -> None:
+        kind = query.data.split(":", 1)[1]
+        if kind not in ("cups", "telemost"):
+            await query.answer()
+            return
+        tg_id = query.from_user.id
+        if carrier_monitor is not None and carrier_monitor.failed(kind):
+            await query.answer("Этот носитель сейчас лежит — выбери другой", show_alert=True)
+            return
+        if ops_lock.locked():  # no await before acquire: check+take is atomic
+            await query.answer("Уже выполняется, подожди пару секунд", show_alert=True)
+            return
+        async with ops_lock:
+            old_channel = bot_users.channel_of(tg_id)
+            if not old_channel:
+                await query.answer("Канала нет — просто /issue", show_alert=True)
+                return
+            user = load_registry(cfg).get(old_channel) or {}
+            left = _cooldown_left(user)
+            if left > 0:
+                await query.answer(
+                    f"Канал менялся меньше {ROTATE_COOLDOWN_S // 60} минут назад — "
+                    f"подожди ещё {left // 60 + 1} мин",
+                    show_alert=True,
+                )
+                return
+            await query.answer("Переезжаю...")
+            await _drop_confirm_buttons(query)
+            msg = await query.message.answer(f"Создаю канал на носителе {kind}, старый удалю...")
+            back_to = None
+            if carrier_monitor is not None and kind in carrier_monitor.recovered_carriers():
+                if old_channel in carrier_monitor.moved_channels(kind):
+                    back_to = kind  # going back to the recovered carrier (R4)
+            try:
+                result = await _move_user(old_channel, carrier_of(user), kind, back_to)
+            except Exception as exc:  # noqa: BLE001 - user-facing error text
+                await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
+                return
+        note = ", возврат на основной" if back_to else ""
+        await msg.edit_text(_link_message(result["channel"], result["link"], f"готов (носитель {kind}){note}"))
+        await query.message.answer_photo(
             qr_photo(result["link"]), caption="QR для приложения",
             reply_markup=ReplyKeyboardRemove(),
         )
