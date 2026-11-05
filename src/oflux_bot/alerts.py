@@ -41,6 +41,8 @@ from pathlib import Path
 
 from docprovider.cupsrooms import ROOM_URL, first_room
 
+from .analytics import emit
+
 COOLDOWN_S = 3600
 K_FAILS = 3
 M_OKS = 2
@@ -346,17 +348,20 @@ class Watchdog:
             for kind in sorted(carrier_healthy):
                 verdict = self.carrier.feed(kind, carrier_healthy[kind])
                 if verdict == "failed":
+                    emit("carrier_failed", carrier=kind)
                     await self.send(
                         f"🚨 носитель {kind} признан нерабочим ({self.carrier.k} проверок подряд) — "
                         "пользователям отправлено предупреждение"
                     )
                     await self._warn_users(kind)
                 elif verdict == "unstable":
+                    emit("carrier_unstable", carrier=kind)
                     await self.send(
                         f"🎚 носитель {kind} нестабилен ({FLAP_UNSTABLE_AFTER} срывов за час) — "
                         "молчу, пока не стабилизируется"
                     )
                 elif verdict in ("recovered", "recovered_stable"):
+                    emit("carrier_recovered", carrier=kind, stable=verdict == "recovered_stable")
                     tail = " (после нестабильности)" if verdict == "recovered_stable" else ""
                     await self.send(f"🟢 носитель {kind} восстановился{tail}")
                     await self._offer_return(kind)
@@ -381,6 +386,7 @@ class Watchdog:
                     and carrier_healthy.get(kind)
                     and user.get("tg_id")
                 ):
+                    emit("channel_warning", carrier=kind, tg=user["tg_id"])
                     await self.notify_user(user["tg_id"], _channel_warning_text())
                     continue
                 pending.append(("alert", f"channel:{channel}", text))
@@ -453,6 +459,8 @@ class Watchdog:
             for u in channels.values()
             if _kind_of(u) == kind and u.get("tg_id")
         }
+        if tgs:
+            emit("carrier_warning", carrier=kind, users=len(tgs))
         for tg in sorted(tgs):
             await self.notify_user(tg, _carrier_warning_text())
 

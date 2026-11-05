@@ -22,6 +22,7 @@ from aiogram.types import BufferedInputFile, Message, ReplyKeyboardRemove
 import qrcode
 
 from .alerts import SPARE
+from .analytics import emit
 from .config import BotConfig, BotUsers
 from .ops import (
     carrier_of,
@@ -338,8 +339,10 @@ def register_handlers(
                 # doc creation + provisioning block for tens of seconds
                 result = await asyncio.to_thread(issue_channel, cfg, bot_users, tg_id, None, carrier=kind)
             except Exception as exc:  # noqa: BLE001 - user-facing error text
+                emit("issue_error", carrier=kind, tg=tg_id, error=str(exc)[:120])
                 await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
                 return
+            emit("issue", carrier=kind, tg=tg_id)
         await msg.edit_text(_link_message(result["channel"], result["link"], f"готов (носитель {kind})"))
         await query.message.answer_photo(
             qr_photo(result["link"]), caption="QR для приложения",
@@ -383,8 +386,10 @@ def register_handlers(
             try:
                 result = await _move_user(old_channel, carrier_of(user), kind, back_to)
             except Exception as exc:  # noqa: BLE001 - user-facing error text
+                emit("switch_error", frm=carrier_of(user), to=kind, tg=tg_id, error=str(exc)[:120])
                 await msg.edit_text(f"Не получилось: {str(exc)[:200]}")
                 return
+            emit("switch", frm=carrier_of(user), to=kind, back=bool(back_to), tg=tg_id)
         note = ", возврат на основной" if back_to else ""
         await msg.edit_text(_link_message(result["channel"], result["link"], f"готов (носитель {kind}){note}"))
         await query.message.answer_photo(
@@ -507,8 +512,10 @@ def register_handlers(
                 try:
                     result = await _move_user(channel, kind, target)
                 except Exception as exc:  # noqa: BLE001
+                    emit("switch_error", frm=kind, to=target, tg=query.from_user.id, error=str(exc)[:120])
                     await query.message.edit_text(f"Не получилось: {str(exc)[:200]}")
                     return
+                emit("switch", frm=kind, to=target, back=False, tg=query.from_user.id)
                 await query.message.edit_text(
                     _link_message(result["channel"], result["link"], f"готов (переезд на {target})")
                 )
@@ -523,8 +530,10 @@ def register_handlers(
                 # ops are blocking subprocess/systemctl calls: keep the loop free
                 result = await asyncio.to_thread(rotate_channel, cfg, channel)
             except Exception as exc:  # noqa: BLE001
+                emit("rotate_error", carrier=kind, tg=query.from_user.id, error=str(exc)[:120])
                 await query.message.edit_text(f"Не получилось: {str(exc)[:200]}")
                 return
+            emit("rotate", carrier=kind, tg=query.from_user.id)
             await query.message.edit_text(_link_message(channel, result["link"], "новый ключ"))
             await query.message.answer_photo(
                 qr_photo(result["link"]), caption="новый QR",
@@ -542,6 +551,7 @@ def register_handlers(
             await query.answer("Уже выполняется, подожди пару секунд", show_alert=True)
             return
         async with ops_lock:
+            rcarrier = carrier_of(load_registry(cfg).get(channel) or {})
             await query.answer("Удаляю...")
             await _drop_confirm_buttons(query)
             try:
@@ -549,6 +559,7 @@ def register_handlers(
             except Exception as exc:  # noqa: BLE001
                 await query.message.edit_text(f"Не получилось: {str(exc)[:200]}")
                 return
+            emit("revoke", carrier=rcarrier, tg=tg_id)
             text = f"Канал {channel} удалён."
             for err in errors:
                 text += f"\nпредупреждение уборки: {err}"
@@ -579,6 +590,7 @@ def register_handlers(
         await query.answer()
         if route is None:
             return
+        emit("cmd", cmd=name, tg=query.from_user.id)
         await route(_MsgAsUser(query.message, query.from_user.id))
 
 
