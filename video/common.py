@@ -22,8 +22,19 @@ SECRETS_DIR = VIDEO_DIR / "secrets"
 OUTBOX_DIR = VIDEO_DIR / "outbox"
 PUBLISHED_DIR = VIDEO_DIR / "published"
 STATE_PATH = VIDEO_DIR / "state.json"
+BIN_DIR = VIDEO_DIR / "bin"  # optional static ffmpeg/ffprobe (full-filter build)
 
 TIKTOK_DESC_LIMIT = 2200
+
+
+def ffmpeg_bin() -> str:
+    local = BIN_DIR / "ffmpeg"
+    return str(local) if local.exists() else "ffmpeg"
+
+
+def ffprobe_bin() -> str:
+    local = BIN_DIR / "ffprobe"
+    return str(local) if local.exists() else "ffprobe"
 
 
 def ensure_dirs() -> None:

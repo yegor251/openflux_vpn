@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import OUTBOX_DIR, ensure_dirs, file_hash, slugify  # noqa: E402
+from common import OUTBOX_DIR, ensure_dirs, ffmpeg_bin, file_hash, slugify  # noqa: E402
 
 
 def die(msg: str) -> None:
@@ -42,8 +42,8 @@ def run(cmd: list[str]) -> None:
 
 
 def need_ffmpeg() -> None:
-    if not shutil.which("ffmpeg"):
-        die("ffmpeg не найден — поставь: brew install ffmpeg")
+    if shutil.which(ffmpeg_bin()) is None:
+        die("ffmpeg не найден — brew install ffmpeg или статик в video/bin/")
 
 
 def find_font(size: int) -> str:
@@ -143,7 +143,7 @@ def ffmpeg_master(master: Path, out: Path, srt: Path | None, cards: bool, title:
     vf = f"scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
     if srt:
         vf += f",subtitles={srt}:force_style='FontSize=18,Outline=2'"
-    run(["ffmpeg", "-y", "-i", str(master), "-vf", vf, "-c:v", "libx264", "-crf", "20",
+    run([ffmpeg_bin(), "-y", "-i", str(master), "-vf", vf, "-c:v", "libx264", "-crf", "20",
          "-c:a", "aac", "-b:a", "160k", str(norm)])
 
     if not cards:
@@ -151,7 +151,7 @@ def ffmpeg_master(master: Path, out: Path, srt: Path | None, cards: bool, title:
         return
     intro, outro = make_cards(title, tmp, vertical=False)
     for card in (intro, outro):
-        run(["ffmpeg", "-y", "-loop", "1", "-t", "2", "-i", str(card),
+        run([ffmpeg_bin(), "-y", "-loop", "1", "-t", "2", "-i", str(card),
              "-f", "lavfi", "-t", "2", "-i", "anullsrc=r=44100:cl=stereo",
              "-vf", "scale=1920:1080", "-c:v", "libx264", "-crf", "20",
              "-c:a", "aac", "-b:a", "160k", "-shortest", str(tmp / (card.stem + ".mp4"))])
@@ -159,7 +159,7 @@ def ffmpeg_master(master: Path, out: Path, srt: Path | None, cards: bool, title:
     listing.write_text(
         "\n".join(f"file '{p}'" for p in
                   (tmp / "card_0.mp4", norm, tmp / "card_1.mp4")), encoding="utf-8")
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
+    run([ffmpeg_bin(), "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
          "-c", "copy", str(out)])
 
 

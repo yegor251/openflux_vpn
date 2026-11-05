@@ -4,3 +4,5 @@ published/
 state.json
 *.mp4
 *.png
+bin/
+out/
