@@ -1,0 +1,6 @@
+secrets/
+outbox/
+published/
+state.json
+*.mp4
+*.png

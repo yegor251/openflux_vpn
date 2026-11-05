@@ -105,12 +105,15 @@ upload_tiktok("vertical_sub.mp4", description="...", cookies="cookies.txt")
 + описание с хештегами, публикация руками из приложения (2 тапа).
 Держим как запасной на случай бана/поломки селекторов.
 
-## 4. Что скелетить в репу (scripts/video/)
+## 4. Реализация: `video/` в корне репы (готово, 2026-11-05)
 
-- `build.py master.mp4 --title "..."` → master/vertical/cover/srt
-- `publish.py --youtube --tiktok --title --desc` → оба канала, отчёт
-- `cookies.txt` (TikTok) и `client_secret.json` (Google) — 0600, вне git
-- state: `published.json` (что уже выложено, чтобы не задублировать)
+- `video/build.py master.mov --title "..."` → outbox/<slug>/ с master 16:9,
+  vertical 9:16, cover.png, meta.json (субтитры: --srt или локальный Whisper)
+- `video/publish.py --all` → YouTube (Data API, --proxy для РФ) +
+  TikTok (tiktok-uploader по кукам); state.json против дублей,
+  опубликованное уезжает в published/
+- установка и настройка секретов: `video/README.md`
+- депс: `pip install -r video/requirements.txt` + ffmpeg (brew)
 
 ## Источники
 

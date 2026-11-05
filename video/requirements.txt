@@ -1,0 +1,11 @@
+# Video pipeline deps (install into the repo venv or a dedicated one):
+#   pip install -r video/requirements.txt
+pillow
+google-api-python-client
+google-auth-oauthlib
+pysocks
+tiktok-uploader
+
+# Optional: auto-subtitles via local Whisper (heavy: pulls torch).
+# Without it use --srt <file> in build.py.
+# openai-whisper
