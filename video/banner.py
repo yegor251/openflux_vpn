@@ -21,6 +21,10 @@ W, H = 380, 96
 FRAMES = 24  # 1 s loop at 24 fps
 ACCENTS = [(124, 92, 255), (60, 190, 255), (41, 211, 255), (124, 92, 255), (180, 92, 255)]
 
+# bottom-band mode: a large lower-third strip (video content stays visible above)
+BAND_W, BAND_H = 1080, 360
+
+
 
 def _rounded(draw, box, radius, fill=None, outline=None, width=1):
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
@@ -80,6 +84,75 @@ def render_frames(out_dir: Path, brand: str = "OPENFLUX", part_label: str = "") 
         img.save(path)
         paths.append(path)
     return paths
+
+
+def render_frames_band(out_dir: Path, brand: str = "OPENFLUX", part_label: str = "") -> list[Path]:
+    """Large lower-third band: dark strip, sweeping gradient on the top edge,
+    big equalizer, wordmark + part label. Scaled 1:1 onto 1080-wide verticals."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    font_path = "/System/Library/Fonts/Helvetica.ttc"
+    brand_font = ImageFont.truetype(font_path, 96)
+    part_font = ImageFont.truetype(font_path, 56)
+    paths = []
+    for frame in range(FRAMES):
+        phase = 2 * math.pi * frame / FRAMES
+        img = Image.new("RGBA", (BAND_W, BAND_H), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        # body: dark strip with soft breathing glow along the top
+        draw.rectangle((0, 6, BAND_W, BAND_H), fill=(13, 15, 23, 228))
+        glow = int(8 + 5 * math.sin(phase))
+        draw.rectangle((0, 6 - glow // 2, BAND_W, 10), fill=(41, 120, 255, 40))
+
+        # sweeping gradient on the top edge (the "gif" element)
+        seg = BAND_W // 5
+        sweep_start = int((math.sin(phase * 0.9) * 0.5 + 0.5) * (BAND_W - seg))
+        for s in range(6):
+            x0 = sweep_start + s * seg // 6
+            x1 = sweep_start + (s + 1) * seg // 6
+            color = _hue_frame_color(s, frame, FRAMES)
+            draw.rectangle((max(0, x0), 0, min(BAND_W, x1), 6), fill=color + (255,))
+
+        # equalizer: 9 bars bouncing on the left block
+        bar_w, gap, base_x, base_y = 22, 14, 56, BAND_H - 60
+        for i in range(9):
+            hgt = int(70 + 90 * (0.5 + 0.5 * math.sin(phase * 2 + i * 0.9)))
+            draw.rounded_rectangle(
+                (base_x + i * (bar_w + gap), base_y - hgt, base_x + i * (bar_w + gap) + bar_w, base_y),
+                radius=8, fill=ACCENTS[i % len(ACCENTS)] + (255,),
+            )
+
+        # wordmark + part label
+        draw.text((base_x + 9 * (bar_w + gap) + 30, BAND_H // 2 - 78), brand,
+                  font=brand_font, fill=(244, 244, 248, 255))
+        if part_label:
+            tw = draw.textlength(part_label, font=part_font)
+            draw.text((BAND_W - tw - 40, BAND_H // 2 - 40), part_label,
+                      font=part_font, fill=(41, 211, 255, 240))
+
+        path = out_dir / f"banner_{frame:02d}.png"
+        img.save(path)
+        paths.append(path)
+    return paths
+
+
+def render_webm_band(out_path: Path, brand: str = "OPENFLUX", part_label: str = "") -> Path:
+    tmp = out_path.parent / f"banner-band-frames-{out_path.stem}"
+    render_frames_band(tmp, brand, part_label)
+    proc = subprocess.run([
+        "ffmpeg", "-y", "-framerate", "24",
+        "-i", str(tmp / "banner_%02d.png"),
+        "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", "30",
+        "-an", str(out_path),
+    ], capture_output=True, text=True)
+    for p in tmp.glob("*.png"):
+        p.unlink()
+    tmp.rmdir()
+    if proc.returncode != 0:
+        raise RuntimeError(f"banner band failed: {proc.stderr[-400:]}")
+    return out_path
 
 
 def render_webm(out_path: Path, brand: str = "OPENFLUX", part_label: str = "") -> Path:
